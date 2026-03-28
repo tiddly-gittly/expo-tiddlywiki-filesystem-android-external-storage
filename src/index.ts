@@ -66,6 +66,17 @@ interface IExternalStorageModule {
   readFileBase64(path: string): Promise<string>;
   writeFileUtf8(path: string, content: string): Promise<void>;
   writeFileBase64(path: string, base64Content: string): Promise<void>;
+  /**
+   * Append a Base64-encoded chunk to a file, optionally truncating first.
+   *
+   * Designed for streaming large writes from JS in bounded-memory chunks
+   * (e.g. 512 KB each) so the JVM never allocates the full file content,
+   * avoiding OOM on 50+ MB git pack files.
+   *
+   * @param truncateFirst Pass `true` for the first chunk to create/truncate
+   *                      the file, then `false` for subsequent chunks.
+   */
+  appendFileBase64(path: string, base64Content: string, truncateFirst: boolean): Promise<void>;
   writeFilesBase64(paths: string[], base64Contents: string[]): Promise<BatchWriteResult>;
   deleteFile(path: string): Promise<void>;
 

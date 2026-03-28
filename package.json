@@ -1,6 +1,6 @@
 {
   "name": "expo-filesystem-android-external-storage",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Expo native module for raw file system access on Android external storage",
   "main": "build/index.js",
   "types": "build/index.d.ts",

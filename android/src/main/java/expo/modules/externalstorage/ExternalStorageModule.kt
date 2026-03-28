@@ -140,6 +140,32 @@ class ExternalStorageModule : Module() {
       file.writeBytes(bytes)
     }
 
+    /**
+     * Append a Base64-encoded chunk to a file, optionally truncating it first.
+     *
+     * This is designed for **streaming large writes from JS in bounded-memory
+     * chunks** (e.g. 512 KB per call).  By keeping each chunk small the JVM
+     * never needs to allocate the full file content at once, avoiding OOM on
+     * 50+ MB git pack files.
+     *
+     * @param path           Plain filesystem path
+     * @param base64Content  Chunk of data encoded as Base64
+     * @param truncateFirst  If true the file is created / truncated before
+     *                       writing; pass true for the first chunk only.
+     */
+    AsyncFunction("appendFileBase64") { path: String, base64Content: String, truncateFirst: Boolean ->
+      val file = File(path)
+      file.parentFile?.let { parent ->
+        if (!parent.exists()) parent.mkdirs()
+      }
+      val bytes = Base64.decode(base64Content, Base64.DEFAULT)
+      // truncateFirst=true  → overwrite (new file or truncate existing)
+      // truncateFirst=false → append to existing file
+      FileOutputStream(file, !truncateFirst).use { fos ->
+        fos.write(bytes)
+      }
+    }
+
     AsyncFunction("writeFilesBase64") { paths: List<String>, base64Contents: List<String> ->
       if (paths.size != base64Contents.size) {
         throw Exception("paths/base64Contents length mismatch: ${paths.size} vs ${base64Contents.size}")
