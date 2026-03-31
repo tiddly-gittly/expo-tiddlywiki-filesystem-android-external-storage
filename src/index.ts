@@ -46,6 +46,18 @@ interface HttpPostToFileResult {
   bytesWritten: number;
 }
 
+interface DownloadFileResumableResult {
+  statusCode: number;
+  /** Final size of the file on disk after download */
+  totalBytes: number;
+  /** true if the download resumed from a partial file (HTTP 206) */
+  resumed: boolean;
+}
+
+interface ExtractTarResult {
+  filesExtracted: number;
+}
+
 interface ReadFileChunkResult {
   /** Base64-encoded chunk data */
   data: string;
@@ -112,6 +124,35 @@ interface IExternalStorageModule {
    * Use this to stream a large file into JS in bounded-memory chunks.
    */
   readFileChunk(path: string, offset: number, length: number): Promise<ReadFileChunkResult>;
+
+  /**
+   * Download a file via HTTP GET with resumable download support.
+   *
+   * If `destPath` already exists on disk (from a previous interrupted download),
+   * sends `Range: bytes=<existingSize>-` to resume. The server must respond
+   * with 206 Partial Content for resume to work; otherwise the file is
+   * overwritten from scratch (200 response).
+   *
+   * @param url       Target URL
+   * @param headers   Extra HTTP headers (e.g. Authorization, ETag)
+   * @param destPath  Plain filesystem path for the downloaded file
+   */
+  downloadFileResumable(
+    url: string,
+    headers: Record<string, string>,
+    destPath: string,
+  ): Promise<DownloadFileResumableResult>;
+
+  /**
+   * Extract an uncompressed tar archive to a destination directory.
+   * Uses a native tar parser — no third-party dependency.
+   * Supports POSIX ustar and GNU long-name extensions.
+   * Validates paths to prevent directory traversal attacks.
+   *
+   * @param tarPath  Path to the .tar file
+   * @param destDir  Destination directory (created if needed)
+   */
+  extractTar(tarPath: string, destDir: string): Promise<ExtractTarResult>;
 }
 
 export const ExternalStorage: IExternalStorageModule = new Proxy({} as IExternalStorageModule, {
@@ -132,4 +173,4 @@ export function toPlainPath(uriOrPath: string): string {
   return uriOrPath;
 }
 
-export type { BatchWriteResult, FileInfo, HttpPostToFileResult, IExternalStorageModule, ReadFileChunkResult };
+export type { BatchWriteResult, DownloadFileResumableResult, ExtractTarResult, FileInfo, HttpPostToFileResult, IExternalStorageModule, ReadFileChunkResult };
