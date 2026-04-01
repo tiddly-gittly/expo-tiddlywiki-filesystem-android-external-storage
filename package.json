@@ -1,7 +1,7 @@
 {
-  "name": "expo-filesystem-android-external-storage",
-  "version": "1.1.0",
-  "description": "Expo native module for raw file system access on Android external storage",
+  "name": "expo-tiddlywiki-filesystem-android-external-storage",
+  "version": "1.0.0",
+  "description": "Expo native module for TidGi-Mobile: external storage I/O + TiddlyWiki .tid/.meta/.json batch parsing in Kotlin",
   "main": "build/index.js",
   "types": "build/index.d.ts",
   "plugin": "app.plugin.js",

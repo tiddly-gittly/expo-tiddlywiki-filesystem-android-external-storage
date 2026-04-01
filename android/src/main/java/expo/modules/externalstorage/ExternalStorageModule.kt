@@ -5,11 +5,17 @@ import android.os.Environment
 import android.util.Base64
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
@@ -517,6 +523,241 @@ class ExternalStorageModule : Module() {
 
       mapOf("filesExtracted" to filesExtracted)
     }
+
+    // ─── TiddlyWiki batch file parsing ─────────────────────────────────
+
+    /**
+     * Parse a batch of TiddlyWiki tiddler files entirely in Kotlin.
+     *
+     * This is the critical performance optimization: instead of making
+     * 100+ JS→Native bridge calls (one per file), a single call parses
+     * an entire batch and returns a ready-to-inject JSON array string.
+     *
+     * Supports:
+     * - .tid files: header + body, with skinny mode (omit text for large tiddlers)
+     * - .json files: single tiddler or array of tiddlers (also plugin bundles)
+     * - .meta files: metadata companion for binary/.json files
+     *
+     * @param filePaths     Array of absolute file paths to parse
+     * @param quickLoadMode If true, always return skinny tiddlers (no text)
+     * @return JSON string: array of tiddler objects, e.g. `[{"title":"...","text":"..."}, ...]`
+     */
+    AsyncFunction("batchParseTidFiles") { filePaths: List<String>, quickLoadMode: Boolean ->
+      coroutineScope {
+        // Read and parse all files in parallel using Kotlin coroutines.
+        // Each file I/O happens on the IO dispatcher (thread pool), saturating
+        // disk bandwidth instead of waiting sequentially.
+        val deferredResults = filePaths.map { path ->
+          async(Dispatchers.IO) {
+            try {
+              parseTiddlerFile(path, quickLoadMode)
+            } catch (e: Exception) {
+              // Don't fail the whole batch for one bad file
+              null
+            }
+          }
+        }
+
+        val allResults = deferredResults.awaitAll()
+
+        // Build a JSON array string directly — avoids JS-side JSON.stringify
+        val jsonArray = JSONArray()
+        for (result in allResults) {
+          if (result == null) continue
+          when (result) {
+            is JSONObject -> jsonArray.put(result)
+            is JSONArray -> {
+              for (i in 0 until result.length()) {
+                jsonArray.put(result.getJSONObject(i))
+              }
+            }
+          }
+        }
+        jsonArray.toString()
+      }
+    }
+  }
+
+  // ─── TiddlyWiki file parsing helpers ───────────────────────────────
+
+  /**
+   * Parse a single tiddler file. Returns JSONObject, JSONArray (for .json
+   * arrays), or null if the file cannot be parsed.
+   */
+  private fun parseTiddlerFile(path: String, quickLoadMode: Boolean): Any? {
+    val file = File(path)
+    if (!file.exists()) return null
+    val name = file.name
+
+    return when {
+      name.endsWith(".tid") -> parseDotTid(file, quickLoadMode)
+      name.endsWith(".json") -> parseDotJson(file)
+      name.endsWith(".meta") -> parseDotMeta(file, quickLoadMode)
+      else -> null
+    }
+  }
+
+  /**
+   * Parse a .tid file (TiddlyWiki native format).
+   * Format: `key: value\n` headers, blank line, then body text.
+   */
+  private fun parseDotTid(file: File, quickLoadMode: Boolean): JSONObject? {
+    val content = file.readText(Charsets.UTF_8)
+    val json = JSONObject()
+
+    // Find the first blank line separating headers from body
+    val blankLineRegex = Regex("\r?\n\r?\n")
+    val match = blankLineRegex.find(content)
+    val headerText = if (match != null) content.substring(0, match.range.first) else content
+    val bodyOffset = match?.let { it.range.last + 1 } ?: -1
+    val estimatedBodyLength = if (bodyOffset >= 0) content.length - bodyOffset else 0
+
+    // Parse header lines
+    for (line in headerText.split(Regex("\r?\n"))) {
+      val colonIndex = line.indexOf(':')
+      if (colonIndex != -1) {
+        val fieldName = line.substring(0, colonIndex).trim()
+        val fieldValue = line.substring(colonIndex + 1).trim()
+        if (fieldName.isNotEmpty()) {
+          json.put(fieldName, fieldValue)
+        }
+      }
+    }
+
+    // Use filename as title fallback
+    if (!json.has("title")) {
+      json.put("title", getTitleFromFilename(file.name))
+    }
+
+    val title = json.optString("title", "")
+    val type = json.optString("type", "")
+    val hasModuleType = json.has("module-type")
+    val hasPluginType = json.has("plugin-type")
+
+    // Determine if we should include full text
+    val shouldIncludeText = !quickLoadMode && shouldSaveFullTiddler(
+      title, type, hasModuleType, hasPluginType, estimatedBodyLength,
+    )
+
+    if (shouldIncludeText && bodyOffset >= 0 && estimatedBodyLength > 0) {
+      json.put("text", content.substring(bodyOffset))
+    } else if (!shouldIncludeText) {
+      // Skinny tiddler — mark for lazy loading
+      json.remove("text")
+      json.put("_is_skinny", "yes")
+    }
+
+    return json
+  }
+
+  /**
+   * Parse a .json tiddler file.
+   * Can be: single tiddler `{title: ...}`, array of tiddlers, or
+   * a plugin bundle `{tiddlers: {...}}` (returned as null — loaded via .meta).
+   */
+  private fun parseDotJson(file: File): Any? {
+    val content = file.readText(Charsets.UTF_8)
+    return try {
+      // Try as JSON array first
+      if (content.trimStart().startsWith("[")) {
+        val array = JSONArray(content)
+        val result = JSONArray()
+        for (i in 0 until array.length()) {
+          val obj = array.optJSONObject(i)
+          if (obj != null && obj.has("title")) {
+            result.put(obj)
+          }
+        }
+        if (result.length() > 0) result else null
+      } else {
+        val obj = JSONObject(content)
+        if (obj.has("title")) {
+          obj
+        } else {
+          // Plugin bundle format {tiddlers: {...}} — skip here,
+          // it's loaded via .meta companion file
+          null
+        }
+      }
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  /**
+   * Parse a .meta companion file. The .meta has only field definitions;
+   * the actual content is in the companion file (same name without .meta).
+   */
+  private fun parseDotMeta(metaFile: File, quickLoadMode: Boolean): JSONObject? {
+    val metaContent = metaFile.readText(Charsets.UTF_8)
+    val json = JSONObject()
+
+    // Parse key: value pairs
+    for (line in metaContent.split(Regex("\r?\n"))) {
+      val colonIndex = line.indexOf(':')
+      if (colonIndex != -1) {
+        val fieldName = line.substring(0, colonIndex).trim()
+        val fieldValue = line.substring(colonIndex + 1).trim()
+        if (fieldName.isNotEmpty()) {
+          json.put(fieldName, fieldValue)
+        }
+      }
+    }
+
+    if (!json.has("title")) {
+      val metaName = metaFile.name
+      json.put("title", getTitleFromFilename(metaName.removeSuffix(".meta")))
+    }
+
+    // Find companion file
+    val companionPath = metaFile.absolutePath.removeSuffix(".meta")
+    val companionFile = File(companionPath)
+
+    if (companionFile.exists()) {
+      if (companionPath.endsWith(".json")) {
+        // .meta + .json pair: the .json IS the text content (e.g. plugin bundles).
+        // Must include text so the tiddler is complete.
+        if (!quickLoadMode) {
+          val jsonContent = companionFile.readText(Charsets.UTF_8)
+          json.put("text", jsonContent)
+        } else {
+          json.put("_is_skinny", "yes")
+        }
+      }
+      // For non-JSON companions (images, etc.), we don't set _canonical_uri here —
+      // that requires knowing the workspace base path. JS side handles it.
+    }
+
+    return if (json.has("title")) json else null
+  }
+
+  /**
+   * Decide whether a tiddler's full text should be included in the boot store.
+   * Mirrors the JS `shouldSaveFullTiddler()` logic.
+   */
+  private fun shouldSaveFullTiddler(
+    title: String,
+    type: String,
+    hasModuleType: Boolean,
+    hasPluginType: Boolean,
+    estimatedTextLength: Int,
+  ): Boolean {
+    // System tiddlers
+    if (title.startsWith("\$:/")) return true
+    // Plugins
+    if (type == "application/json" && hasPluginType) return true
+    // Module tiddlers
+    if (hasModuleType) return true
+    // Small tiddlers (< 10KB)
+    if (estimatedTextLength < 10000) return true
+    return false
+  }
+
+  private fun getTitleFromFilename(filename: String): String {
+    return filename
+      .removeSuffix(".tid")
+      .removeSuffix(".json")
+      .removeSuffix(".meta")
   }
 
   // --- Tar helper functions ---

@@ -153,6 +153,26 @@ interface IExternalStorageModule {
    * @param destDir  Destination directory (created if needed)
    */
   extractTar(tarPath: string, destDir: string): Promise<ExtractTarResult>;
+
+  /**
+   * Parse a batch of TiddlyWiki tiddler files entirely in native Kotlin.
+   *
+   * This is the critical performance optimization for initial wiki loading:
+   * a single bridge call processes 100+ files in parallel, returning a
+   * ready-to-inject JSON array string. Eliminates per-file bridge round-trips.
+   *
+   * Supports .tid, .json, and .meta files. Applies skinny logic:
+   * - System tiddlers ($:/) → always full text
+   * - Plugins (application/json + plugin-type) → always full text
+   * - Module tiddlers (module-type) → always full text
+   * - Small tiddlers (< 10KB body) → full text
+   * - Large user tiddlers → skinny (_is_skinny: "yes", text omitted)
+   *
+   * @param filePaths     Array of absolute filesystem paths
+   * @param quickLoadMode If true, all tiddlers returned as skinny
+   * @returns JSON string: serialized array of tiddler field objects
+   */
+  batchParseTidFiles(filePaths: string[], quickLoadMode: boolean): Promise<string>;
 }
 
 export const ExternalStorage: IExternalStorageModule = new Proxy({} as IExternalStorageModule, {
