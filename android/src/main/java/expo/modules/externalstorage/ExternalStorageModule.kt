@@ -5,10 +5,6 @@ import android.os.Environment
 import android.util.Base64
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -543,38 +539,31 @@ class ExternalStorageModule : Module() {
      * @return JSON string: array of tiddler objects, e.g. `[{"title":"...","text":"..."}, ...]`
      */
     AsyncFunction("batchParseTidFiles") { filePaths: List<String>, quickLoadMode: Boolean ->
-      coroutineScope {
-        // Read and parse all files in parallel using Kotlin coroutines.
-        // Each file I/O happens on the IO dispatcher (thread pool), saturating
-        // disk bandwidth instead of waiting sequentially.
-        val deferredResults = filePaths.map { path ->
-          async(Dispatchers.IO) {
-            try {
-              parseTiddlerFile(path, quickLoadMode)
-            } catch (e: Exception) {
-              // Don't fail the whole batch for one bad file
-              null
+      // Parse all files in parallel using a thread pool.
+      // Expo's AsyncFunction already runs off the main thread, so we
+      // use Java's ForkJoinPool (via parallelStream) for concurrent I/O.
+      val results = filePaths.parallelStream().map { path ->
+        try {
+          parseTiddlerFile(path, quickLoadMode)
+        } catch (e: Exception) {
+          null
+        }
+      }.toList()
+
+      // Build a JSON array string directly — avoids JS-side JSON.stringify
+      val jsonArray = JSONArray()
+      for (result in results) {
+        if (result == null) continue
+        when (result) {
+          is JSONObject -> jsonArray.put(result)
+          is JSONArray -> {
+            for (i in 0 until result.length()) {
+              jsonArray.put(result.getJSONObject(i))
             }
           }
         }
-
-        val allResults = deferredResults.awaitAll()
-
-        // Build a JSON array string directly — avoids JS-side JSON.stringify
-        val jsonArray = JSONArray()
-        for (result in allResults) {
-          if (result == null) continue
-          when (result) {
-            is JSONObject -> jsonArray.put(result)
-            is JSONArray -> {
-              for (i in 0 until result.length()) {
-                jsonArray.put(result.getJSONObject(i))
-              }
-            }
-          }
-        }
-        jsonArray.toString()
       }
+      jsonArray.toString()
     }
   }
 
