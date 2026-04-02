@@ -580,7 +580,7 @@ class ExternalStorageModule : Module() {
 
     return when {
       name.endsWith(".tid") -> parseDotTid(file, quickLoadMode)
-      name.endsWith(".json") -> parseDotJson(file)
+      name.endsWith(".json") -> parseDotJson(file, quickLoadMode)
       name.endsWith(".meta") -> parseDotMeta(file, quickLoadMode)
       else -> null
     }
@@ -644,8 +644,9 @@ class ExternalStorageModule : Module() {
    * Can be: single tiddler `{title: ...}`, array of tiddlers, or
    * a plugin bundle `{tiddlers: {...}}` (returned as null — loaded via .meta).
    */
-  private fun parseDotJson(file: File): Any? {
+  private fun parseDotJson(file: File, quickLoadMode: Boolean): Any? {
     val content = file.readText(Charsets.UTF_8)
+    val fallbackTitle = getTitleFromFilename(file.name)
     return try {
       // Try as JSON array first
       if (content.trimStart().startsWith("[")) {
@@ -657,20 +658,41 @@ class ExternalStorageModule : Module() {
             result.put(obj)
           }
         }
-        if (result.length() > 0) result else null
+        if (result.length() > 0) {
+          result
+        } else {
+          createStandaloneJsonTiddler(fallbackTitle, content, quickLoadMode)
+        }
       } else {
         val obj = JSONObject(content)
         if (obj.has("title")) {
+          if (!obj.has("type")) {
+            obj.put("type", "application/json")
+          }
           obj
-        } else {
+        } else if (obj.has("tiddlers")) {
           // Plugin bundle format {tiddlers: {...}} — skip here,
           // it's loaded via .meta companion file
           null
+        } else {
+          createStandaloneJsonTiddler(fallbackTitle, content, quickLoadMode)
         }
       }
     } catch (_: Exception) {
-      null
+      createStandaloneJsonTiddler(fallbackTitle, content, quickLoadMode)
     }
+  }
+
+  private fun createStandaloneJsonTiddler(title: String, content: String, quickLoadMode: Boolean): JSONObject {
+    val json = JSONObject()
+    json.put("title", title)
+    json.put("type", "application/json")
+    if (quickLoadMode) {
+      json.put("_is_skinny", "yes")
+    } else {
+      json.put("text", content)
+    }
+    return json
   }
 
   /**
