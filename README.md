@@ -1,4 +1,4 @@
-# expo-filesystem-android-external-storage
+# expo-tiddlywiki-filesystem-android-external-storage
 
 An Expo Config Plugin and Native Module for accessing Android's External Storage (e.g. `/sdcard/Documents/`) directly using `java.io.File`, bypassing Expo FileSystem's scoped storage restrictions.
 
@@ -32,9 +32,9 @@ Therefore, we implemented this **Native Module** which uses standard `java.io.Fi
 ## Installation
 
 ```bash
-npm install expo-filesystem-android-external-storage
+npm install expo-tiddlywiki-filesystem-android-external-storage
 # or
-pnpm add expo-filesystem-android-external-storage
+pnpm add expo-tiddlywiki-filesystem-android-external-storage
 ```
 
 ## Configuration
@@ -50,7 +50,7 @@ Actually, this package is primarily the *native implementation*. You should ensu
 ## Usage
 
 ```typescript
-import { ExternalStorage } from 'expo-filesystem-android-external-storage';
+import { ExternalStorage } from 'expo-tiddlywiki-filesystem-android-external-storage';
 
 async function example() {
   const path = '/sdcard/Documents/myfile.txt';

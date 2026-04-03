@@ -623,10 +623,12 @@ class ExternalStorageModule : Module() {
     val hasModuleType = json.has("module-type")
     val hasPluginType = json.has("plugin-type")
 
-    // Determine if we should include full text
-    val shouldIncludeText = !quickLoadMode && shouldSaveFullTiddler(
-      title, type, hasModuleType, hasPluginType, estimatedBodyLength,
-    )
+    // Quick load still needs full text for boot-critical tiddlers.
+    val shouldIncludeText = if (quickLoadMode) {
+      shouldPreserveFullTextInQuickLoad(title, type, hasModuleType, hasPluginType)
+    } else {
+      shouldSaveFullTiddler(title, type, hasModuleType, hasPluginType, estimatedBodyLength)
+    }
 
     if (shouldIncludeText && bodyOffset >= 0 && estimatedBodyLength > 0) {
       json.put("text", content.substring(bodyOffset))
@@ -728,7 +730,17 @@ class ExternalStorageModule : Module() {
       if (companionPath.endsWith(".json")) {
         // .meta + .json pair: the .json IS the text content (e.g. plugin bundles).
         // Must include text so the tiddler is complete.
-        if (!quickLoadMode) {
+        val shouldIncludeText = if (quickLoadMode) {
+          shouldPreserveFullTextInQuickLoad(
+            json.optString("title", ""),
+            json.optString("type", ""),
+            json.has("module-type"),
+            json.has("plugin-type"),
+          )
+        } else {
+          true
+        }
+        if (shouldIncludeText) {
           val jsonContent = companionFile.readText(Charsets.UTF_8)
           json.put("text", jsonContent)
         } else {
@@ -753,14 +765,21 @@ class ExternalStorageModule : Module() {
     hasPluginType: Boolean,
     estimatedTextLength: Int,
   ): Boolean {
-    // System tiddlers
-    if (title.startsWith("\$:/")) return true
-    // Plugins
-    if (type == "application/json" && hasPluginType) return true
-    // Module tiddlers
-    if (hasModuleType) return true
+    if (shouldPreserveFullTextInQuickLoad(title, type, hasModuleType, hasPluginType)) return true
     // Small tiddlers (< 10KB)
     if (estimatedTextLength < 10000) return true
+    return false
+  }
+
+  private fun shouldPreserveFullTextInQuickLoad(
+    title: String,
+    type: String,
+    hasModuleType: Boolean,
+    hasPluginType: Boolean,
+  ): Boolean {
+    if (title.startsWith("\$:/")) return true
+    if (type == "application/json" && hasPluginType) return true
+    if (hasModuleType) return true
     return false
   }
 
