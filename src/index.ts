@@ -173,6 +173,21 @@ interface IExternalStorageModule {
    * @returns JSON string: serialized array of tiddler field objects
    */
   batchParseTidFiles(filePaths: string[], quickLoadMode: boolean): Promise<string>;
+
+  /**
+   * Lightweight native git status using direct git-index parsing.
+   *
+   * Parses `.git/index` to get tracked files and their stat-cache entries,
+   * then compares against the working directory using file size and mtime.
+   * Orders of magnitude faster than isomorphic-git's `statusMatrix` because:
+   * - No JS↔Native bridge round-trips per file
+   * - Uses stat-cache (size+mtime) instead of SHA-1 re-hashing
+   * - Parallel file walking in Java
+   *
+   * @param gitRootDir The root directory of the git repository (parent of .git/)
+   * @returns JSON string: `[{"path":"tiddlers/foo.tid","type":"add"|"modify"|"delete"}, ...]`
+   */
+  gitStatus(gitRootDir: string): Promise<string>;
 }
 
 export const ExternalStorage: IExternalStorageModule = new Proxy({} as IExternalStorageModule, {

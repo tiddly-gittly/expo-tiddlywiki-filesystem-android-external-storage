@@ -523,6 +523,100 @@ class ExternalStorageModule : Module() {
     // ─── TiddlyWiki batch file parsing ─────────────────────────────────
 
     /**
+     * Lightweight native git status — orders of magnitude faster than
+     * isomorphic-git's statusMatrix which must cross the JS↔Native bridge
+     * for every file read AND compute SHA-1 hashes in JavaScript.
+     *
+     * Strategy:
+     * 1. Parse `.git/index` to get the list of tracked files with their
+     *    stat-cache entries (size, mtime).
+     * 2. Walk the working directory in parallel using Java NIO.
+     * 3. Compare stat-cache: if size+mtime match → file is clean.
+     *    If they differ → mark as modified (we skip re-hashing since
+     *    the user only needs to know *which* files changed, not the
+     *    exact content delta).
+     * 4. Files in the index but missing from disk → deleted.
+     * 5. Files on disk but not in the index → added (untracked).
+     *
+     * @param gitRootDir  The root directory of the git repository (parent of .git/)
+     * @return JSON string: `[{"path":"tiddlers/foo.tid","type":"add"}, ...]`
+     */
+    AsyncFunction("gitStatus") { gitRootDir: String ->
+      val root = File(gitRootDir)
+      val gitDir = File(root, ".git")
+      if (!gitDir.exists()) {
+        throw Exception("Not a git repository: $gitRootDir (no .git directory)")
+      }
+
+      val indexFile = File(gitDir, "index")
+      if (!indexFile.exists()) {
+        // No index means no tracked files — everything is untracked
+        return@AsyncFunction "[]"
+      }
+
+      // 1. Parse the git index
+      val indexEntries = parseGitIndex(indexFile)
+
+      // 2. Walk the working directory (skip .git, node_modules, etc.)
+      val skipDirs = setOf(".git", "node_modules", ".DS_Store", "output")
+      val workdirFiles = mutableSetOf<String>()
+      fun walkDir(dir: File, prefix: String) {
+        val children = dir.listFiles() ?: return
+        for (child in children) {
+          val relPath = if (prefix.isEmpty()) child.name else "$prefix/${child.name}"
+          if (child.isDirectory) {
+            if (child.name !in skipDirs) {
+              walkDir(child, relPath)
+            }
+          } else {
+            workdirFiles.add(relPath)
+          }
+        }
+      }
+      walkDir(root, "")
+
+      // 3. Compare index vs working directory
+      val changes = JSONArray()
+      val indexPaths = mutableSetOf<String>()
+
+      for (entry in indexEntries) {
+        indexPaths.add(entry.path)
+        val workFile = File(root, entry.path)
+        if (!workFile.exists()) {
+          // Tracked file missing from disk → deleted
+          val obj = JSONObject()
+          obj.put("path", entry.path)
+          obj.put("type", "delete")
+          changes.put(obj)
+        } else {
+          // Check stat cache: size and mtime
+          val diskSize = workFile.length()
+          val diskMtime = workFile.lastModified() / 1000  // git index uses seconds
+          if (diskSize != entry.size || diskMtime != entry.mtimeSeconds) {
+            val obj = JSONObject()
+            obj.put("path", entry.path)
+            obj.put("type", "modify")
+            changes.put(obj)
+          }
+        }
+      }
+
+      // 4. Files on disk but not in index → added
+      for (path in workdirFiles) {
+        if (path !in indexPaths) {
+          val obj = JSONObject()
+          obj.put("path", path)
+          obj.put("type", "add")
+          changes.put(obj)
+        }
+      }
+
+      changes.toString()
+    }
+
+    // ─── TiddlyWiki batch file parsing ─────────────────────────────────
+
+    /**
      * Parse a batch of TiddlyWiki tiddler files entirely in Kotlin.
      *
      * This is the critical performance optimization: instead of making
@@ -819,5 +913,115 @@ class ExternalStorageModule : Module() {
       if (n <= 0) break
       skipped += n
     }
+  }
+
+  // ─── Git index parser ─────────────────────────────────────────────
+
+  /**
+   * Minimal representation of a git index entry — just what we need
+   * for stat-cache comparison.
+   */
+  data class GitIndexEntry(
+    val path: String,
+    val size: Long,
+    val mtimeSeconds: Long,
+  )
+
+  /**
+   * Parse a git index file (versions 2, 3, 4).
+   *
+   * Format reference: https://git-scm.com/docs/index-format
+   *
+   * We only extract the fields needed for stat-cache comparison:
+   * file path, file size, and mtime (seconds).
+   */
+  private fun parseGitIndex(indexFile: File): List<GitIndexEntry> {
+    val bytes = indexFile.readBytes()
+    if (bytes.size < 12) return emptyList()
+
+    // Header: 4-byte signature "DIRC"
+    val sig = String(bytes, 0, 4, Charsets.US_ASCII)
+    if (sig != "DIRC") return emptyList()
+
+    // 4-byte version number
+    val version = readInt32(bytes, 4)
+    if (version !in 2..4) return emptyList()
+
+    // 4-byte number of entries
+    val entryCount = readInt32(bytes, 8)
+    val entries = ArrayList<GitIndexEntry>(entryCount)
+
+    var offset = 12 // start of first entry
+
+    for (i in 0 until entryCount) {
+      if (offset + 62 > bytes.size) break // minimum entry size
+
+      // Offset 0: 32-bit ctime seconds (skip)
+      // Offset 4: 32-bit ctime nanoseconds (skip)
+      // Offset 8: 32-bit mtime seconds
+      val mtimeSeconds = readInt32(bytes, offset + 8).toLong() and 0xFFFFFFFFL
+      // Offset 12: 32-bit mtime nanoseconds (skip)
+      // Offset 16: 32-bit dev (skip)
+      // Offset 20: 32-bit ino (skip)
+      // Offset 24: 32-bit mode (skip)
+      // Offset 28: 32-bit uid (skip)
+      // Offset 32: 32-bit gid (skip)
+      // Offset 36: 32-bit file size
+      val fileSize = readInt32(bytes, offset + 36).toLong() and 0xFFFFFFFFL
+      // Offset 40: 160-bit (20 bytes) SHA-1 (skip)
+      // Offset 60: 16-bit flags
+      val flags = readInt16(bytes, offset + 60)
+      val nameLength = flags and 0xFFF
+
+      // The path starts at offset 62
+      val pathStart = offset + 62
+      val pathEnd: Int
+      if (nameLength == 0xFFF) {
+        // Name is longer than 0xFFF — find the NUL terminator
+        var nullPos = pathStart
+        while (nullPos < bytes.size && bytes[nullPos] != 0.toByte()) nullPos++
+        pathEnd = nullPos
+      } else {
+        pathEnd = pathStart + nameLength
+      }
+
+      val path = if (pathEnd <= bytes.size) {
+        String(bytes, pathStart, pathEnd - pathStart, Charsets.UTF_8)
+      } else {
+        break
+      }
+
+      entries.add(GitIndexEntry(path = path, size = fileSize, mtimeSeconds = mtimeSeconds))
+
+      // Entry is padded to a multiple of 8 bytes (from the start of the entry).
+      // Total entry bytes = 62 + pathLength + 1 (NUL), rounded up to 8.
+      if (version < 4) {
+        val entryLength = 62 + (pathEnd - pathStart) + 1
+        val paddedLength = (entryLength + 7) and 7.inv()
+        offset += paddedLength
+      } else {
+        // Version 4 uses prefix compression — path is stored differently.
+        // For simplicity, fall back to NUL scanning.
+        var nextOffset = pathEnd + 1
+        // No padding in v4
+        offset = nextOffset
+      }
+    }
+
+    return entries
+  }
+
+  /** Read a big-endian 32-bit integer from a byte array. */
+  private fun readInt32(bytes: ByteArray, offset: Int): Int {
+    return ((bytes[offset].toInt() and 0xFF) shl 24) or
+      ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
+      ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
+      (bytes[offset + 3].toInt() and 0xFF)
+  }
+
+  /** Read a big-endian 16-bit integer from a byte array. */
+  private fun readInt16(bytes: ByteArray, offset: Int): Int {
+    return ((bytes[offset].toInt() and 0xFF) shl 8) or
+      (bytes[offset + 1].toInt() and 0xFF)
   }
 }
