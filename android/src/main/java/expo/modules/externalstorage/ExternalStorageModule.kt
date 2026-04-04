@@ -556,9 +556,16 @@ class ExternalStorageModule : Module() {
 
       // 1. Parse the git index
       val indexEntries = parseGitIndex(indexFile)
+      android.util.Log.i("GitStatus", "Parsed ${indexEntries.size} entries from git index at $gitRootDir")
+      if (indexEntries.size <= 5) {
+        indexEntries.forEach { e -> android.util.Log.i("GitStatus", "  index: ${e.path} size=${e.size} mtime=${e.mtimeSeconds}") }
+      } else {
+        indexEntries.take(3).forEach { e -> android.util.Log.i("GitStatus", "  index: ${e.path} size=${e.size} mtime=${e.mtimeSeconds}") }
+        android.util.Log.i("GitStatus", "  ... and ${indexEntries.size - 3} more entries")
+      }
 
       // 2. Walk the working directory (skip .git, node_modules, etc.)
-      val skipDirs = setOf(".git", "node_modules", ".DS_Store", "output")
+      val skipDirs = setOf(".git", "node_modules", "output")
       val workdirFiles = mutableSetOf<String>()
       fun walkDir(dir: File, prefix: String) {
         val children = dir.listFiles() ?: return
@@ -574,6 +581,10 @@ class ExternalStorageModule : Module() {
         }
       }
       walkDir(root, "")
+      android.util.Log.i("GitStatus", "Found ${workdirFiles.size} files on disk")
+      // Log files in tiddlers/ dir specifically
+      val tiddlerFiles = workdirFiles.filter { it.startsWith("tiddlers/") }
+      android.util.Log.i("GitStatus", "  tiddlers/ count: ${tiddlerFiles.size}, sample: ${tiddlerFiles.take(5).joinToString()}")
 
       // 3. Compare index vs working directory
       val changes = JSONArray()
