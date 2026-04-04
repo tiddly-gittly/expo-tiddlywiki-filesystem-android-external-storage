@@ -832,27 +832,46 @@ class ExternalStorageModule : Module() {
     val companionFile = File(companionPath)
 
     if (companionFile.exists()) {
-      if (companionPath.endsWith(".json")) {
-        // .meta + .json pair: the .json IS the text content (e.g. plugin bundles).
-        // Must include text so the tiddler is complete.
+      val tiddlerType = json.optString("type", "text/vnd.tiddlywiki")
+      val hasModuleType = json.has("module-type")
+      val hasPluginType = json.has("plugin-type")
+
+      // Determine whether this companion is a text file whose content
+      // should be loaded as the tiddler's "text" field.
+      // JS modules, CSS, JSON, and other text-based companions need their content.
+      // Binary companions (images, pdfs, etc.) should NOT have their content loaded;
+      // they use _canonical_uri instead (handled later by JS).
+      val isTextCompanion = companionPath.endsWith(".json") ||
+        companionPath.endsWith(".js") ||
+        companionPath.endsWith(".css") ||
+        companionPath.endsWith(".svg") ||
+        companionPath.endsWith(".txt") ||
+        companionPath.endsWith(".html") ||
+        companionPath.endsWith(".htm") ||
+        tiddlerType.startsWith("text/") ||
+        tiddlerType == "application/javascript" ||
+        tiddlerType == "application/json" ||
+        tiddlerType == "application/x-tiddler-dictionary"
+
+      if (isTextCompanion) {
         val shouldIncludeText = if (quickLoadMode) {
           shouldPreserveFullTextInQuickLoad(
             json.optString("title", ""),
-            json.optString("type", ""),
-            json.has("module-type"),
-            json.has("plugin-type"),
+            tiddlerType,
+            hasModuleType,
+            hasPluginType,
           )
         } else {
           true
         }
         if (shouldIncludeText) {
-          val jsonContent = companionFile.readText(Charsets.UTF_8)
-          json.put("text", jsonContent)
+          val textContent = companionFile.readText(Charsets.UTF_8)
+          json.put("text", textContent)
         } else {
           json.put("_is_skinny", "yes")
         }
       }
-      // For non-JSON companions (images, etc.), we don't set _canonical_uri here —
+      // For binary companions (images, etc.), we don't set _canonical_uri here —
       // that requires knowing the workspace base path. JS side handles it.
     }
 
