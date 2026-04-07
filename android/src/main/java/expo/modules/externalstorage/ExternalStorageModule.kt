@@ -524,240 +524,16 @@ class ExternalStorageModule : Module() {
       mapOf("filesExtracted" to filesExtracted)
     }
 
-    // ─── TiddlyWiki batch file parsing ─────────────────────────────────
+    // ─── Git status ──────────────────────────────────────────────────
 
-    /**
-     * Lightweight native git status — orders of magnitude faster than
-     * isomorphic-git's statusMatrix which must cross the JS↔Native bridge
-     * for every file read AND compute SHA-1 hashes in JavaScript.
-     *
-     * Strategy:
-     * 1. Parse `.git/index` to get the list of tracked files with their
-     *    stat-cache entries (size, mtime).
-     * 2. Walk the working directory in parallel using Java NIO.
-     * 3. Compare stat-cache: if size+mtime match → file is clean.
-     *    If they differ → mark as modified (we skip re-hashing since
-     *    the user only needs to know *which* files changed, not the
-     *    exact content delta).
-     * 4. Files in the index but missing from disk → deleted.
-     * 5. Files on disk but not in the index → added (untracked).
-     *
-     * @param gitRootDir  The root directory of the git repository (parent of .git/)
-     * @return JSON string: `[{"path":"tiddlers/foo.tid","type":"add"}, ...]`
-     */
     AsyncFunction("gitStatus") { gitRootDir: String ->
-      val root = File(gitRootDir)
-      val gitDir = File(root, ".git")
-      if (!gitDir.exists()) {
-        throw Exception("Not a git repository: $gitRootDir (no .git directory)")
-      }
-
-      val indexFile = File(gitDir, "index")
-      if (!indexFile.exists()) {
-        // No index means no tracked files — everything is untracked
-        return@AsyncFunction "[]"
-      }
-
-      // 1. Parse the git index
-      val indexEntries = parseGitIndex(indexFile)
-      android.util.Log.i("GitStatus", "Parsed ${indexEntries.size} entries from git index at $gitRootDir")
-      if (indexEntries.size <= 5) {
-        indexEntries.forEach { e -> android.util.Log.i("GitStatus", "  index: ${e.path} size=${e.size} mtime=${e.mtimeSeconds}") }
-      } else {
-        indexEntries.take(3).forEach { e -> android.util.Log.i("GitStatus", "  index: ${e.path} size=${e.size} mtime=${e.mtimeSeconds}") }
-        android.util.Log.i("GitStatus", "  ... and ${indexEntries.size - 3} more entries")
-      }
-
-      // 2. Walk the working directory (skip .git, node_modules, etc.)
-      val skipDirs = setOf(".git", "node_modules", "output")
-      val workdirFiles = mutableSetOf<String>()
-      fun walkDir(dir: File, prefix: String) {
-        val children = dir.listFiles() ?: return
-        for (child in children) {
-          val relPath = if (prefix.isEmpty()) child.name else "$prefix/${child.name}"
-          if (child.isDirectory) {
-            if (child.name !in skipDirs) {
-              walkDir(child, relPath)
-            }
-          } else {
-            workdirFiles.add(relPath)
-          }
-        }
-      }
-      walkDir(root, "")
-      android.util.Log.i("GitStatus", "Found ${workdirFiles.size} files on disk")
-      // Log files in tiddlers/ dir specifically
-      val tiddlerFiles = workdirFiles.filter { it.startsWith("tiddlers/") }
-      android.util.Log.i("GitStatus", "  tiddlers/ count: ${tiddlerFiles.size}, sample: ${tiddlerFiles.take(5).joinToString()}")
-
-      // 3. Compare index vs working directory
-      val changes = JSONArray()
-      val indexPaths = mutableSetOf<String>()
-
-      var modifiedCount = 0
-      var deletedCount = 0
-      for (entry in indexEntries) {
-        indexPaths.add(entry.path)
-        val workFile = File(root, entry.path)
-        if (!workFile.exists()) {
-          // Tracked file missing from disk → deleted
-          val obj = JSONObject()
-          obj.put("path", entry.path)
-          obj.put("type", "delete")
-          changes.put(obj)
-          deletedCount++
-        } else {
-          // Check stat cache: size and mtime
-          val diskSize = workFile.length()
-          val diskMtime = workFile.lastModified() / 1000  // git index uses seconds
-          if (diskSize != entry.size || diskMtime != entry.mtimeSeconds) {
-            val obj = JSONObject()
-            obj.put("path", entry.path)
-            obj.put("type", "modify")
-            changes.put(obj)
-            modifiedCount++
-            if (modifiedCount <= 3) {
-              android.util.Log.i("GitStatus", "  modify: ${entry.path} disk(size=$diskSize,mtime=$diskMtime) vs index(size=${entry.size},mtime=${entry.mtimeSeconds})")
-            }
-          }
-        }
-      }
-
-      // 4. Files on disk but not in index → added
-      var addedCount = 0
-      for (path in workdirFiles) {
-        if (path !in indexPaths) {
-          val obj = JSONObject()
-          obj.put("path", path)
-          obj.put("type", "add")
-          changes.put(obj)
-          addedCount++
-          if (addedCount <= 5) {
-            android.util.Log.i("GitStatus", "  add: $path")
-          }
-        }
-      }
-
-      android.util.Log.i("GitStatus", "Result: ${changes.length()} changes (add=$addedCount, modify=$modifiedCount, delete=$deletedCount), indexEntries=${indexEntries.size}, workdirFiles=${workdirFiles.size}")
-      changes.toString()
+      doGitStatus(gitRootDir)
     }
 
-    /**
-     * Return diagnostic info about git index vs working directory.
-     * Used to debug why gitStatus returns 0 when changes exist.
-     */
     AsyncFunction("gitStatusDebug") { gitRootDir: String ->
-      val root = File(gitRootDir)
-      val gitDir = File(root, ".git")
-      val indexFile = File(gitDir, "index")
-
-      val result = JSONObject()
-      result.put("rootExists", root.exists())
-      result.put("rootIsDir", root.isDirectory)
-      result.put("gitDirExists", gitDir.exists())
-      result.put("gitDirIsDir", gitDir.isDirectory)
-      result.put("indexFileExists", indexFile.exists())
-      result.put("rootPath", root.absolutePath)
-      result.put("gitDirPath", gitDir.absolutePath)
-      result.put("indexPath", indexFile.absolutePath)
-
-      // List contents of root (first 10)
-      val rootChildren = root.listFiles()?.map { it.name }?.sorted()?.take(10) ?: emptyList()
-      result.put("rootChildren", JSONArray(rootChildren))
-
-      // List contents of .git if exists
-      if (gitDir.exists() && gitDir.isDirectory) {
-        val gitChildren = gitDir.listFiles()?.map { it.name }?.sorted() ?: emptyList()
-        result.put("gitDirChildren", JSONArray(gitChildren))
-      }
-
-      if (!indexFile.exists()) {
-        return@AsyncFunction result.toString()
-      }
-
-      val indexEntries = parseGitIndex(indexFile)
-      result.put("indexEntryCount", indexEntries.size)
-
-      // Sample a few index entries with their stats
-      val indexSamples = JSONArray()
-      // Find $__StoryList.tid or similar common tiddler in the index
-      val storyListEntry = indexEntries.find { it.path == "tiddlers/\$__StoryList.tid" }
-      if (storyListEntry != null) {
-        val obj = JSONObject()
-        obj.put("path", storyListEntry.path)
-        obj.put("indexSize", storyListEntry.size)
-        obj.put("indexMtime", storyListEntry.mtimeSeconds)
-        val workFile = File(root, storyListEntry.path)
-        obj.put("diskExists", workFile.exists())
-        if (workFile.exists()) {
-          obj.put("diskSize", workFile.length())
-          obj.put("diskMtime", workFile.lastModified() / 1000)
-          obj.put("diskMtimeMs", workFile.lastModified())
-          obj.put("sizeMatch", workFile.length() == storyListEntry.size)
-          obj.put("mtimeMatch", workFile.lastModified() / 1000 == storyListEntry.mtimeSeconds)
-        }
-        indexSamples.put(obj)
-      }
-
-      // Check 新条目.tid
-      val newEntryFile = File(root, "tiddlers/新条目.tid")
-      val newObj = JSONObject()
-      newObj.put("path", "tiddlers/新条目.tid")
-      newObj.put("diskExists", newEntryFile.exists())
-      if (newEntryFile.exists()) {
-        newObj.put("diskSize", newEntryFile.length())
-        newObj.put("diskMtime", newEntryFile.lastModified() / 1000)
-      }
-      val inIndex = indexEntries.any { it.path == "tiddlers/新条目.tid" }
-      newObj.put("inIndex", inIndex)
-      indexSamples.put(newObj)
-
-      // Walk working dir and count
-      val skipDirs = setOf(".git", "node_modules", "output")
-      val workdirFiles = mutableSetOf<String>()
-      fun walkDir(dir: File, prefix: String) {
-        val children = dir.listFiles() ?: return
-        for (child in children) {
-          val relPath = if (prefix.isEmpty()) child.name else "$prefix/${child.name}"
-          if (child.isDirectory) {
-            if (child.name !in skipDirs) walkDir(child, relPath)
-          } else {
-            workdirFiles.add(relPath)
-          }
-        }
-      }
-      walkDir(root, "")
-
-      result.put("workdirFileCount", workdirFiles.size)
-      result.put("tiddlerFileCount", workdirFiles.count { it.startsWith("tiddlers/") })
-      result.put("newEntryInWorkdir", workdirFiles.contains("tiddlers/新条目.tid"))
-      result.put("samples", indexSamples)
-
-      // Count files in workdir not in index (potential adds)
-      val indexPaths = indexEntries.map { it.path }.toSet()
-      val addCount = workdirFiles.count { it !in indexPaths }
-      result.put("potentialAddCount", addCount)
-      // List first 5 potential adds
-      val addSamples = JSONArray()
-      workdirFiles.filter { it !in indexPaths }.take(5).forEach { addSamples.put(it) }
-      result.put("potentialAddSamples", addSamples)
-
-      result.toString()
+      doGitStatusDebug(gitRootDir)
     }
 
-    /**
-     * Build a .git/index file from scratch by:
-     * 1. Resolving HEAD → commit SHA → tree SHA
-     * 2. Walking the tree recursively to enumerate (path, mode, blobSHA)
-     * 3. Stat'ing each file on disk natively
-     * 4. Writing a v2 binary .git/index file
-     *
-     * This is MUCH faster than isomorphic-git checkout because everything
-     * runs natively without JS↔Kotlin bridge per-file overhead.
-     *
-     * @param gitRootDir  The repo root (parent of .git/)
-     * @return JSON string with status: {"ok":true,"entries":N} or {"ok":false,"error":"..."}
-     */
     AsyncFunction("buildGitIndex") { gitRootDir: String ->
       doBuildGitIndex(gitRootDir)
     }
@@ -1079,6 +855,186 @@ class ExternalStorageModule : Module() {
       val n = stream.skip(totalBytes - skipped)
       if (n <= 0) break
       skipped += n
+    }
+  }
+
+  // ─── Git status implementation ────────────────────────────────────
+
+  /**
+   * Lightweight native git status — compares .git/index stat-cache
+   * against working directory files using size+mtime.
+   */
+  private fun doGitStatus(gitRootDir: String): String {
+    val root = File(gitRootDir)
+    val gitDir = File(root, ".git")
+    if (!gitDir.exists()) {
+      throw Exception("Not a git repository: $gitRootDir (no .git directory)")
+    }
+
+    val indexFile = File(gitDir, "index")
+    if (!indexFile.exists()) {
+      return "[]"
+    }
+
+    // 1. Parse the git index
+    val indexEntries = parseGitIndex(indexFile)
+    android.util.Log.i("GitStatus", "Parsed ${indexEntries.size} entries from git index at $gitRootDir")
+    if (indexEntries.size <= 5) {
+      indexEntries.forEach { e -> android.util.Log.i("GitStatus", "  index: ${e.path} size=${e.size} mtime=${e.mtimeSeconds}") }
+    } else {
+      indexEntries.take(3).forEach { e -> android.util.Log.i("GitStatus", "  index: ${e.path} size=${e.size} mtime=${e.mtimeSeconds}") }
+      android.util.Log.i("GitStatus", "  ... and ${indexEntries.size - 3} more entries")
+    }
+
+    // 2. Walk the working directory (skip .git, node_modules, etc.)
+    val skipDirs = setOf(".git", "node_modules", "output")
+    val workdirFiles = mutableSetOf<String>()
+    walkWorkDir(root, "", skipDirs, workdirFiles)
+    android.util.Log.i("GitStatus", "Found ${workdirFiles.size} files on disk")
+    val tiddlerFiles = workdirFiles.filter { it.startsWith("tiddlers/") }
+    android.util.Log.i("GitStatus", "  tiddlers/ count: ${tiddlerFiles.size}, sample: ${tiddlerFiles.take(5).joinToString()}")
+
+    // 3. Compare index vs working directory
+    val changes = JSONArray()
+    val indexPaths = mutableSetOf<String>()
+
+    var modifiedCount = 0
+    var deletedCount = 0
+    for (entry in indexEntries) {
+      indexPaths.add(entry.path)
+      val workFile = File(root, entry.path)
+      if (!workFile.exists()) {
+        val obj = JSONObject()
+        obj.put("path", entry.path)
+        obj.put("type", "delete")
+        changes.put(obj)
+        deletedCount++
+      } else {
+        val diskSize = workFile.length()
+        val diskMtime = workFile.lastModified() / 1000
+        if (diskSize != entry.size || diskMtime != entry.mtimeSeconds) {
+          val obj = JSONObject()
+          obj.put("path", entry.path)
+          obj.put("type", "modify")
+          changes.put(obj)
+          modifiedCount++
+          if (modifiedCount <= 3) {
+            android.util.Log.i("GitStatus", "  modify: ${entry.path} disk(size=$diskSize,mtime=$diskMtime) vs index(size=${entry.size},mtime=${entry.mtimeSeconds})")
+          }
+        }
+      }
+    }
+
+    // 4. Files on disk but not in index -> added
+    var addedCount = 0
+    for (path in workdirFiles) {
+      if (path !in indexPaths) {
+        val obj = JSONObject()
+        obj.put("path", path)
+        obj.put("type", "add")
+        changes.put(obj)
+        addedCount++
+        if (addedCount <= 5) {
+          android.util.Log.i("GitStatus", "  add: $path")
+        }
+      }
+    }
+
+    android.util.Log.i("GitStatus", "Result: ${changes.length()} changes (add=$addedCount, modify=$modifiedCount, delete=$deletedCount), indexEntries=${indexEntries.size}, workdirFiles=${workdirFiles.size}")
+    return changes.toString()
+  }
+
+  /** Diagnostic info about git index vs working directory. */
+  private fun doGitStatusDebug(gitRootDir: String): String {
+    val root = File(gitRootDir)
+    val gitDir = File(root, ".git")
+    val indexFile = File(gitDir, "index")
+
+    val result = JSONObject()
+    result.put("rootExists", root.exists())
+    result.put("rootIsDir", root.isDirectory)
+    result.put("gitDirExists", gitDir.exists())
+    result.put("gitDirIsDir", gitDir.isDirectory)
+    result.put("indexFileExists", indexFile.exists())
+    result.put("rootPath", root.absolutePath)
+    result.put("gitDirPath", gitDir.absolutePath)
+    result.put("indexPath", indexFile.absolutePath)
+
+    val rootChildren = root.listFiles()?.map { it.name }?.sorted()?.take(10) ?: emptyList()
+    result.put("rootChildren", JSONArray(rootChildren))
+
+    if (gitDir.exists() && gitDir.isDirectory) {
+      val gitChildren = gitDir.listFiles()?.map { it.name }?.sorted() ?: emptyList()
+      result.put("gitDirChildren", JSONArray(gitChildren))
+    }
+
+    if (!indexFile.exists()) {
+      return result.toString()
+    }
+
+    val indexEntries = parseGitIndex(indexFile)
+    result.put("indexEntryCount", indexEntries.size)
+
+    val indexSamples = JSONArray()
+    val storyListEntry = indexEntries.find { it.path == "tiddlers/\$__StoryList.tid" }
+    if (storyListEntry != null) {
+      val obj = JSONObject()
+      obj.put("path", storyListEntry.path)
+      obj.put("indexSize", storyListEntry.size)
+      obj.put("indexMtime", storyListEntry.mtimeSeconds)
+      val workFile = File(root, storyListEntry.path)
+      obj.put("diskExists", workFile.exists())
+      if (workFile.exists()) {
+        obj.put("diskSize", workFile.length())
+        obj.put("diskMtime", workFile.lastModified() / 1000)
+        obj.put("diskMtimeMs", workFile.lastModified())
+        obj.put("sizeMatch", workFile.length() == storyListEntry.size)
+        obj.put("mtimeMatch", workFile.lastModified() / 1000 == storyListEntry.mtimeSeconds)
+      }
+      indexSamples.put(obj)
+    }
+
+    val newEntryFile = File(root, "tiddlers/新条目.tid")
+    val newObj = JSONObject()
+    newObj.put("path", "tiddlers/新条目.tid")
+    newObj.put("diskExists", newEntryFile.exists())
+    if (newEntryFile.exists()) {
+      newObj.put("diskSize", newEntryFile.length())
+      newObj.put("diskMtime", newEntryFile.lastModified() / 1000)
+    }
+    val inIndex = indexEntries.any { it.path == "tiddlers/新条目.tid" }
+    newObj.put("inIndex", inIndex)
+    indexSamples.put(newObj)
+
+    val skipDirs = setOf(".git", "node_modules", "output")
+    val workdirFiles = mutableSetOf<String>()
+    walkWorkDir(root, "", skipDirs, workdirFiles)
+
+    result.put("workdirFileCount", workdirFiles.size)
+    result.put("tiddlerFileCount", workdirFiles.count { it.startsWith("tiddlers/") })
+    result.put("newEntryInWorkdir", workdirFiles.contains("tiddlers/新条目.tid"))
+    result.put("samples", indexSamples)
+
+    val indexPaths = indexEntries.map { it.path }.toSet()
+    val addCount = workdirFiles.count { it !in indexPaths }
+    result.put("potentialAddCount", addCount)
+    val addSamples = JSONArray()
+    workdirFiles.filter { it !in indexPaths }.take(5).forEach { addSamples.put(it) }
+    result.put("potentialAddSamples", addSamples)
+
+    return result.toString()
+  }
+
+  /** Recursively walk a directory, collecting relative file paths. */
+  private fun walkWorkDir(dir: File, prefix: String, skipDirs: Set<String>, files: MutableSet<String>) {
+    val children = dir.listFiles() ?: return
+    for (child in children) {
+      val relPath = if (prefix.isEmpty()) child.name else "$prefix/${child.name}"
+      if (child.isDirectory) {
+        if (child.name !in skipDirs) walkWorkDir(child, relPath, skipDirs, files)
+      } else {
+        files.add(relPath)
+      }
     }
   }
 
