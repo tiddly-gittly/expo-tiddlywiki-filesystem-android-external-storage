@@ -13,11 +13,15 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import java.util.zip.InflaterInputStream
 
 /**
  * Expo native module that performs raw java.io.File I/O on external storage.
@@ -590,6 +594,8 @@ class ExternalStorageModule : Module() {
       val changes = JSONArray()
       val indexPaths = mutableSetOf<String>()
 
+      var modifiedCount = 0
+      var deletedCount = 0
       for (entry in indexEntries) {
         indexPaths.add(entry.path)
         val workFile = File(root, entry.path)
@@ -599,6 +605,7 @@ class ExternalStorageModule : Module() {
           obj.put("path", entry.path)
           obj.put("type", "delete")
           changes.put(obj)
+          deletedCount++
         } else {
           // Check stat cache: size and mtime
           val diskSize = workFile.length()
@@ -608,21 +615,221 @@ class ExternalStorageModule : Module() {
             obj.put("path", entry.path)
             obj.put("type", "modify")
             changes.put(obj)
+            modifiedCount++
+            if (modifiedCount <= 3) {
+              android.util.Log.i("GitStatus", "  modify: ${entry.path} disk(size=$diskSize,mtime=$diskMtime) vs index(size=${entry.size},mtime=${entry.mtimeSeconds})")
+            }
           }
         }
       }
 
       // 4. Files on disk but not in index → added
+      var addedCount = 0
       for (path in workdirFiles) {
         if (path !in indexPaths) {
           val obj = JSONObject()
           obj.put("path", path)
           obj.put("type", "add")
           changes.put(obj)
+          addedCount++
+          if (addedCount <= 5) {
+            android.util.Log.i("GitStatus", "  add: $path")
+          }
         }
       }
 
+      android.util.Log.i("GitStatus", "Result: ${changes.length()} changes (add=$addedCount, modify=$modifiedCount, delete=$deletedCount), indexEntries=${indexEntries.size}, workdirFiles=${workdirFiles.size}")
       changes.toString()
+    }
+
+    /**
+     * Return diagnostic info about git index vs working directory.
+     * Used to debug why gitStatus returns 0 when changes exist.
+     */
+    AsyncFunction("gitStatusDebug") { gitRootDir: String ->
+      val root = File(gitRootDir)
+      val gitDir = File(root, ".git")
+      val indexFile = File(gitDir, "index")
+
+      val result = JSONObject()
+      result.put("rootExists", root.exists())
+      result.put("rootIsDir", root.isDirectory)
+      result.put("gitDirExists", gitDir.exists())
+      result.put("gitDirIsDir", gitDir.isDirectory)
+      result.put("indexFileExists", indexFile.exists())
+      result.put("rootPath", root.absolutePath)
+      result.put("gitDirPath", gitDir.absolutePath)
+      result.put("indexPath", indexFile.absolutePath)
+
+      // List contents of root (first 10)
+      val rootChildren = root.listFiles()?.map { it.name }?.sorted()?.take(10) ?: emptyList()
+      result.put("rootChildren", JSONArray(rootChildren))
+
+      // List contents of .git if exists
+      if (gitDir.exists() && gitDir.isDirectory) {
+        val gitChildren = gitDir.listFiles()?.map { it.name }?.sorted() ?: emptyList()
+        result.put("gitDirChildren", JSONArray(gitChildren))
+      }
+
+      if (!indexFile.exists()) {
+        return@AsyncFunction result.toString()
+      }
+
+      val indexEntries = parseGitIndex(indexFile)
+      result.put("indexEntryCount", indexEntries.size)
+
+      // Sample a few index entries with their stats
+      val indexSamples = JSONArray()
+      // Find $__StoryList.tid or similar common tiddler in the index
+      val storyListEntry = indexEntries.find { it.path == "tiddlers/\$__StoryList.tid" }
+      if (storyListEntry != null) {
+        val obj = JSONObject()
+        obj.put("path", storyListEntry.path)
+        obj.put("indexSize", storyListEntry.size)
+        obj.put("indexMtime", storyListEntry.mtimeSeconds)
+        val workFile = File(root, storyListEntry.path)
+        obj.put("diskExists", workFile.exists())
+        if (workFile.exists()) {
+          obj.put("diskSize", workFile.length())
+          obj.put("diskMtime", workFile.lastModified() / 1000)
+          obj.put("diskMtimeMs", workFile.lastModified())
+          obj.put("sizeMatch", workFile.length() == storyListEntry.size)
+          obj.put("mtimeMatch", workFile.lastModified() / 1000 == storyListEntry.mtimeSeconds)
+        }
+        indexSamples.put(obj)
+      }
+
+      // Check 新条目.tid
+      val newEntryFile = File(root, "tiddlers/新条目.tid")
+      val newObj = JSONObject()
+      newObj.put("path", "tiddlers/新条目.tid")
+      newObj.put("diskExists", newEntryFile.exists())
+      if (newEntryFile.exists()) {
+        newObj.put("diskSize", newEntryFile.length())
+        newObj.put("diskMtime", newEntryFile.lastModified() / 1000)
+      }
+      val inIndex = indexEntries.any { it.path == "tiddlers/新条目.tid" }
+      newObj.put("inIndex", inIndex)
+      indexSamples.put(newObj)
+
+      // Walk working dir and count
+      val skipDirs = setOf(".git", "node_modules", "output")
+      val workdirFiles = mutableSetOf<String>()
+      fun walkDir(dir: File, prefix: String) {
+        val children = dir.listFiles() ?: return
+        for (child in children) {
+          val relPath = if (prefix.isEmpty()) child.name else "$prefix/${child.name}"
+          if (child.isDirectory) {
+            if (child.name !in skipDirs) walkDir(child, relPath)
+          } else {
+            workdirFiles.add(relPath)
+          }
+        }
+      }
+      walkDir(root, "")
+
+      result.put("workdirFileCount", workdirFiles.size)
+      result.put("tiddlerFileCount", workdirFiles.count { it.startsWith("tiddlers/") })
+      result.put("newEntryInWorkdir", workdirFiles.contains("tiddlers/新条目.tid"))
+      result.put("samples", indexSamples)
+
+      // Count files in workdir not in index (potential adds)
+      val indexPaths = indexEntries.map { it.path }.toSet()
+      val addCount = workdirFiles.count { it !in indexPaths }
+      result.put("potentialAddCount", addCount)
+      // List first 5 potential adds
+      val addSamples = JSONArray()
+      workdirFiles.filter { it !in indexPaths }.take(5).forEach { addSamples.put(it) }
+      result.put("potentialAddSamples", addSamples)
+
+      result.toString()
+    }
+
+    /**
+     * Build a .git/index file from scratch by:
+     * 1. Resolving HEAD → commit SHA → tree SHA
+     * 2. Walking the tree recursively to enumerate (path, mode, blobSHA)
+     * 3. Stat'ing each file on disk natively
+     * 4. Writing a v2 binary .git/index file
+     *
+     * This is MUCH faster than isomorphic-git checkout because everything
+     * runs natively without JS↔Kotlin bridge per-file overhead.
+     *
+     * @param gitRootDir  The repo root (parent of .git/)
+     * @return JSON string with status: {"ok":true,"entries":N} or {"ok":false,"error":"..."}
+     */
+    AsyncFunction("buildGitIndex") { gitRootDir: String ->
+      val root = File(gitRootDir)
+      val gitDir = File(root, ".git")
+      if (!gitDir.isDirectory) throw Exception("Not a git repository: $gitRootDir")
+
+      try {
+        // 1. Resolve HEAD to a commit SHA
+        val headFile = File(gitDir, "HEAD")
+        val headContent = headFile.readText(Charsets.UTF_8).trim()
+        val commitSha: String = if (headContent.startsWith("ref: ")) {
+          val refPath = headContent.removePrefix("ref: ")
+          val refFile = File(gitDir, refPath)
+          if (refFile.exists()) {
+            refFile.readText(Charsets.UTF_8).trim()
+          } else {
+            // Try packed-refs
+            resolvePackedRef(gitDir, refPath)
+              ?: throw Exception("Cannot resolve HEAD ref: $refPath")
+          }
+        } else {
+          headContent // Detached HEAD — already a SHA
+        }
+        android.util.Log.i("BuildGitIndex", "HEAD commit: $commitSha")
+
+        // 2. Read the commit object → get tree SHA
+        val commitBytes = readGitObject(gitDir, commitSha)
+          ?: throw Exception("Cannot read commit object: $commitSha")
+        val treeSha = parseCommitTreeSha(commitBytes)
+          ?: throw Exception("Cannot find tree SHA in commit: $commitSha")
+        android.util.Log.i("BuildGitIndex", "Root tree: $treeSha")
+
+        // 3. Walk the tree recursively → collect all entries
+        val entries = mutableListOf<GitTreeEntry>()
+        fun walkTree(sha: String, prefix: String) {
+          val treeBytes = readGitObject(gitDir, sha)
+            ?: throw Exception("Cannot read tree object: $sha")
+          parseTreeEntries(treeBytes).forEach { (name, entryMode, entrySha) ->
+            val fullPath = if (prefix.isEmpty()) name else "$prefix/$name"
+            if (entryMode == 0x4000 || entryMode == 0o40000) {
+              // Directory — recurse
+              walkTree(bytesToHex(entrySha), fullPath)
+            } else {
+              entries.add(GitTreeEntry(fullPath, entryMode, entrySha))
+            }
+          }
+        }
+        walkTree(treeSha, "")
+        android.util.Log.i("BuildGitIndex", "Tree walk found ${entries.size} entries")
+
+        // 4. Sort entries by path (git index requires sorted order)
+        entries.sortBy { it.path }
+
+        // 5. Build the binary index
+        val indexBytes = buildIndexBinary(root, entries)
+
+        // 6. Write to .git/index
+        val indexFile = File(gitDir, "index")
+        indexFile.writeBytes(indexBytes)
+        android.util.Log.i("BuildGitIndex", "Wrote index: ${indexBytes.size} bytes, ${entries.size} entries")
+
+        val result = JSONObject()
+        result.put("ok", true)
+        result.put("entries", entries.size)
+        result.put("indexSize", indexBytes.size)
+        result.toString()
+      } catch (e: Exception) {
+        android.util.Log.e("BuildGitIndex", "Failed: ${e.message}", e)
+        val result = JSONObject()
+        result.put("ok", false)
+        result.put("error", e.message ?: "Unknown error")
+        result.toString()
+      }
     }
 
     // ─── TiddlyWiki batch file parsing ─────────────────────────────────
@@ -943,6 +1150,409 @@ class ExternalStorageModule : Module() {
       if (n <= 0) break
       skipped += n
     }
+  }
+
+  // ─── Git byte-conversion helpers ─────────────────────────────────
+
+  /** Convert a byte array to a lowercase hex string */
+  private fun bytesToHex(bytes: ByteArray): String {
+    return bytes.joinToString("") { "%02x".format(it) }
+  }
+
+  /** Convert a hex string to a byte array */
+  private fun hexToBytes(hex: String): ByteArray {
+    val len = hex.length
+    val data = ByteArray(len / 2)
+    var i = 0
+    while (i < len) {
+      data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
+      i += 2
+    }
+    return data
+  }
+
+  /** Compare two 20-byte SHA-1 arrays lexicographically (unsigned) */
+  private fun compareSha(a: ByteArray, b: ByteArray): Int {
+    for (i in a.indices) {
+      val av = a[i].toInt() and 0xFF
+      val bv = b[i].toInt() and 0xFF
+      if (av != bv) return av - bv
+    }
+    return 0
+  }
+
+  // ─── Git object reading helpers ──────────────────────────────────
+
+  /** Resolve a ref from .git/packed-refs */
+  private fun resolvePackedRef(gitDir: File, refPath: String): String? {
+    val packedRefs = File(gitDir, "packed-refs")
+    if (!packedRefs.exists()) return null
+    for (line in packedRefs.readLines(Charsets.UTF_8)) {
+      if (line.startsWith("#") || line.isBlank()) continue
+      val parts = line.split(" ", limit = 2)
+      if (parts.size == 2 && parts[1].trim() == refPath) {
+        return parts[0].trim()
+      }
+    }
+    return null
+  }
+
+  /**
+   * Read a git object by its SHA-1 hex string.
+   * Tries loose objects first (.git/objects/ab/cdef...),
+   * then falls back to pack files (.git/objects/pack/*.pack).
+   * Returns the raw object content (after the "type size\0" header is stripped).
+   */
+  private fun readGitObject(gitDir: File, sha: String): ByteArray? {
+    // Try loose object first
+    val looseFile = File(gitDir, "objects/${sha.substring(0, 2)}/${sha.substring(2)}")
+    if (looseFile.exists()) {
+      return readLooseObject(looseFile)
+    }
+    // Try pack files
+    val packDir = File(gitDir, "objects/pack")
+    if (!packDir.isDirectory) return null
+    val idxFiles = packDir.listFiles { _, name -> name.endsWith(".idx") } ?: return null
+    for (idxFile in idxFiles) {
+      val packFile = File(idxFile.absolutePath.replace(".idx", ".pack"))
+      if (!packFile.exists()) continue
+      val offset = findObjectInPackIndex(idxFile, sha)
+      if (offset != null) {
+        return readObjectFromPack(packFile, offset, gitDir)
+      }
+    }
+    return null
+  }
+
+  /** Read and decompress a loose git object, returning raw content after header. */
+  private fun readLooseObject(file: File): ByteArray {
+    val compressed = file.readBytes()
+    val inflated = java.util.zip.Inflater().let { inflater ->
+      inflater.setInput(compressed)
+      val buf = ByteArray(8192)
+      val baos = ByteArrayOutputStream()
+      while (!inflater.finished()) {
+        val n = inflater.inflate(buf)
+        baos.write(buf, 0, n)
+      }
+      inflater.end()
+      baos.toByteArray()
+    }
+    // Skip "type size\0" header
+    val nullIdx = inflated.indexOf(0.toByte())
+    return if (nullIdx >= 0) inflated.copyOfRange(nullIdx + 1, inflated.size) else inflated
+  }
+
+  /**
+   * Find an object's offset in a pack index file (v2 format).
+   * Returns the byte offset within the .pack file, or null if not found.
+   */
+  private fun findObjectInPackIndex(idxFile: File, sha: String): Long? {
+    val shaBytes = hexToBytes(sha)
+    RandomAccessFile(idxFile, "r").use { raf ->
+      // V2 index starts with 0xff744f63 magic + 4-byte version
+      val magic = ByteArray(4)
+      raf.readFully(magic)
+      if (magic[0] != 0xFF.toByte() || magic[1] != 0x74.toByte() ||
+        magic[2] != 0x4F.toByte() || magic[3] != 0x63.toByte()) {
+        return null // Not a v2 index
+      }
+      raf.readInt() // version (should be 2)
+
+      // Fanout table: 256 entries of 4-byte big-endian counts
+      val fanout = IntArray(256)
+      for (i in 0 until 256) {
+        fanout[i] = raf.readInt()
+      }
+      val totalObjects = fanout[255]
+
+      // Binary search for the SHA in the sorted SHA table
+      val firstByte = shaBytes[0].toInt() and 0xFF
+      val lo = if (firstByte == 0) 0 else fanout[firstByte - 1]
+      val hi = fanout[firstByte]
+
+      // SHA table starts at offset 8 + 256*4 = 1032
+      val shaTableStart = 8L + 256 * 4
+      // Each SHA entry is 20 bytes
+      var low = lo
+      var high = hi - 1
+      while (low <= high) {
+        val mid = (low + high) / 2
+        raf.seek(shaTableStart + mid * 20L)
+        val entry = ByteArray(20)
+        raf.readFully(entry)
+        val cmp = compareSha(entry, shaBytes)
+        when {
+          cmp < 0 -> low = mid + 1
+          cmp > 0 -> high = mid - 1
+          else -> {
+            // Found! Read the offset from the offset table
+            // CRC table: after SHA table, totalObjects * 4 bytes
+            // Offset table: after CRC table, totalObjects * 4 bytes
+            val offsetTableStart = shaTableStart + totalObjects * 20L + totalObjects * 4L
+            raf.seek(offsetTableStart + mid * 4L)
+            val offset = raf.readInt().toLong() and 0xFFFFFFFFL
+            return if (offset and 0x80000000L != 0L) {
+              // Large offset — read from 8-byte table
+              val largeOffsetTableStart = offsetTableStart + totalObjects * 4L
+              val idx = (offset and 0x7FFFFFFFL).toInt()
+              raf.seek(largeOffsetTableStart + idx * 8L)
+              raf.readLong()
+            } else {
+              offset
+            }
+          }
+        }
+      }
+    }
+    return null
+  }
+
+  /**
+   * Read a single object from a .pack file at the given byte offset.
+   * Handles types: commit, tree, blob, and OFS_DELTA / REF_DELTA.
+   */
+  private fun readObjectFromPack(packFile: File, offset: Long, gitDir: File): ByteArray? {
+    RandomAccessFile(packFile, "r").use { raf ->
+      raf.seek(offset)
+      // Read variable-length object header
+      var byte = raf.read()
+      val type = (byte shr 4) and 0x07
+      var size = (byte and 0x0F).toLong()
+      var shift = 4
+      while (byte and 0x80 != 0) {
+        byte = raf.read()
+        size = size or ((byte and 0x7F).toLong() shl shift)
+        shift += 7
+      }
+
+      return when (type) {
+        1, 2, 3, 4 -> { // commit, tree, blob, tag — just decompress
+          decompressFromRaf(raf, size)
+        }
+        6 -> { // OFS_DELTA
+          // Read negative offset
+          var b = raf.read()
+          var deltaOffset = (b and 0x7F).toLong()
+          while (b and 0x80 != 0) {
+            b = raf.read()
+            deltaOffset = ((deltaOffset + 1) shl 7) or (b and 0x7F).toLong()
+          }
+          val baseOffset = offset - deltaOffset
+          val base = readObjectFromPack(packFile, baseOffset, gitDir) ?: return null
+          val delta = decompressFromRaf(raf, size)
+          applyDelta(base, delta)
+        }
+        7 -> { // REF_DELTA
+          val baseSha = ByteArray(20)
+          raf.readFully(baseSha)
+          val base = readGitObject(gitDir, bytesToHex(baseSha)) ?: return null
+          val delta = decompressFromRaf(raf, size)
+          applyDelta(base, delta)
+        }
+        else -> null
+      }
+    }
+  }
+
+  /** Decompress zlib data from current RAF position */
+  private fun decompressFromRaf(raf: RandomAccessFile, expectedSize: Long): ByteArray {
+    // Read remaining data from current position for decompression
+    val pos = raf.filePointer
+    val remaining = (raf.length() - pos).coerceAtMost(expectedSize * 4 + 4096)
+    val compressed = ByteArray(remaining.toInt())
+    raf.readFully(compressed)
+    val inflater = java.util.zip.Inflater()
+    inflater.setInput(compressed)
+    val baos = ByteArrayOutputStream(expectedSize.toInt())
+    val buf = ByteArray(8192)
+    while (!inflater.finished()) {
+      val n = inflater.inflate(buf)
+      if (n == 0 && inflater.needsInput()) break
+      baos.write(buf, 0, n)
+    }
+    inflater.end()
+    return baos.toByteArray()
+  }
+
+  /** Apply a git delta to a base object */
+  private fun applyDelta(base: ByteArray, delta: ByteArray): ByteArray {
+    var pos = 0
+    // Read base size (variable-length)
+    var baseSize = 0L
+    var shift = 0
+    do {
+      val b = delta[pos++].toInt() and 0xFF
+      baseSize = baseSize or ((b and 0x7F).toLong() shl shift)
+      shift += 7
+    } while (b and 0x80 != 0)
+
+    // Read result size (variable-length)
+    var resultSize = 0L
+    shift = 0
+    do {
+      val b = delta[pos++].toInt() and 0xFF
+      resultSize = resultSize or ((b and 0x7F).toLong() shl shift)
+      shift += 7
+    } while (b and 0x80 != 0)
+
+    val result = ByteArray(resultSize.toInt())
+    var resultPos = 0
+
+    while (pos < delta.size) {
+      val cmd = delta[pos++].toInt() and 0xFF
+      if (cmd and 0x80 != 0) {
+        // Copy from base
+        var copyOffset = 0
+        var copySize = 0
+        if (cmd and 0x01 != 0) copyOffset = delta[pos++].toInt() and 0xFF
+        if (cmd and 0x02 != 0) copyOffset = copyOffset or ((delta[pos++].toInt() and 0xFF) shl 8)
+        if (cmd and 0x04 != 0) copyOffset = copyOffset or ((delta[pos++].toInt() and 0xFF) shl 16)
+        if (cmd and 0x08 != 0) copyOffset = copyOffset or ((delta[pos++].toInt() and 0xFF) shl 24)
+        if (cmd and 0x10 != 0) copySize = delta[pos++].toInt() and 0xFF
+        if (cmd and 0x20 != 0) copySize = copySize or ((delta[pos++].toInt() and 0xFF) shl 8)
+        if (cmd and 0x40 != 0) copySize = copySize or ((delta[pos++].toInt() and 0xFF) shl 16)
+        if (copySize == 0) copySize = 0x10000
+        System.arraycopy(base, copyOffset, result, resultPos, copySize)
+        resultPos += copySize
+      } else if (cmd != 0) {
+        // Insert literal data
+        System.arraycopy(delta, pos, result, resultPos, cmd)
+        pos += cmd
+        resultPos += cmd
+      }
+    }
+    return result
+  }
+
+  /** Parse a commit object to extract the tree SHA (first line: "tree <sha>\n") */
+  private fun parseCommitTreeSha(commitData: ByteArray): String? {
+    val str = String(commitData, Charsets.UTF_8)
+    for (line in str.lineSequence()) {
+      if (line.startsWith("tree ")) {
+        return line.removePrefix("tree ").trim()
+      }
+      if (line.isBlank()) break
+    }
+    return null
+  }
+
+  /**
+   * Parse a tree object into a list of (name, mode, sha-bytes) entries.
+   *
+   * Tree format: repeated entries of "mode name\0<20-byte SHA>"
+   */
+  private fun parseTreeEntries(treeData: ByteArray): List<Triple<String, Int, ByteArray>> {
+    val entries = mutableListOf<Triple<String, Int, ByteArray>>()
+    var pos = 0
+    while (pos < treeData.size) {
+      // Read "mode " (space-separated)
+      var spaceIdx = pos
+      while (spaceIdx < treeData.size && treeData[spaceIdx] != ' '.code.toByte()) spaceIdx++
+      if (spaceIdx >= treeData.size) break
+      val modeStr = String(treeData, pos, spaceIdx - pos, Charsets.US_ASCII)
+      val mode = modeStr.toInt(8)
+      pos = spaceIdx + 1
+
+      // Read name until NUL
+      var nullIdx = pos
+      while (nullIdx < treeData.size && treeData[nullIdx] != 0.toByte()) nullIdx++
+      if (nullIdx >= treeData.size) break
+      val name = String(treeData, pos, nullIdx - pos, Charsets.UTF_8)
+      pos = nullIdx + 1
+
+      // Read 20-byte SHA
+      if (pos + 20 > treeData.size) break
+      val sha = treeData.copyOfRange(pos, pos + 20)
+      pos += 20
+
+      entries.add(Triple(name, mode, sha))
+    }
+    return entries
+  }
+
+  /** Data class for a tree entry (file path, mode, blob SHA bytes) */
+  private data class GitTreeEntry(val path: String, val mode: Int, val sha: ByteArray)
+
+  /**
+   * Build a version 2 .git/index binary from tree entries and disk stats.
+   *
+   * Index v2 format:
+   *   - 12-byte header: "DIRC" + version(4) + numEntries(4)
+   *   - Sorted entries, each:
+   *       ctime_s(4) + ctime_ns(4) + mtime_s(4) + mtime_ns(4) +
+   *       dev(4) + ino(4) + mode(4) + uid(4) + gid(4) +
+   *       file_size(4) + SHA-1(20) + flags(2) + path(variable) + NUL padding to 8-byte boundary
+   *   - 20-byte SHA-1 checksum over the entire index (header + entries)
+   */
+  private fun buildIndexBinary(root: File, entries: List<GitTreeEntry>): ByteArray {
+    val baos = ByteArrayOutputStream()
+
+    fun writeInt32(value: Int) {
+      baos.write((value shr 24) and 0xFF)
+      baos.write((value shr 16) and 0xFF)
+      baos.write((value shr 8) and 0xFF)
+      baos.write(value and 0xFF)
+    }
+
+    // Header: "DIRC" + version 2 + entry count
+    baos.write("DIRC".toByteArray(Charsets.US_ASCII))
+    writeInt32(2) // version
+    writeInt32(entries.size)
+
+    for (entry in entries) {
+      val workFile = File(root, entry.path)
+      val mtimeMs = if (workFile.exists()) workFile.lastModified() else 0L
+      val mtimeS = (mtimeMs / 1000).toInt()
+      val mtimeNs = ((mtimeMs % 1000) * 1_000_000).toInt()
+      val fileSize = if (workFile.exists()) workFile.length().toInt() else 0
+
+      // ctime (same as mtime for simplicity)
+      writeInt32(mtimeS)
+      writeInt32(mtimeNs)
+      // mtime
+      writeInt32(mtimeS)
+      writeInt32(mtimeNs)
+      // dev, ino (0 — not available on Android)
+      writeInt32(0)
+      writeInt32(0)
+      // mode: entry.mode is octal (e.g., 0o100644), needs to be stored as-is
+      writeInt32(entry.mode)
+      // uid, gid (0)
+      writeInt32(0)
+      writeInt32(0)
+      // file size
+      writeInt32(fileSize)
+      // 20-byte SHA-1 of the blob
+      baos.write(entry.sha)
+      // flags: assume flag = (pathLen & 0xFFF)
+      val pathBytes = entry.path.toByteArray(Charsets.UTF_8)
+      val flags = pathBytes.size.coerceAtMost(0xFFF)
+      baos.write((flags shr 8) and 0xFF)
+      baos.write(flags and 0xFF)
+      // path + NUL + padding to 8-byte boundary
+      baos.write(pathBytes)
+      baos.write(0) // NUL terminator
+      // Pad to 8-byte boundary (entry starts at header end or previous entry end)
+      // Total entry size so far = 62 + pathBytes.size + 1
+      val entrySize = 62 + pathBytes.size + 1
+      val padding = (8 - (entrySize % 8)) % 8
+      for (i in 0 until padding) {
+        baos.write(0)
+      }
+    }
+
+    val content = baos.toByteArray()
+
+    // Compute SHA-1 checksum over everything
+    val digest = java.security.MessageDigest.getInstance("SHA-1")
+    val checksum = digest.digest(content)
+
+    // Final result: content + checksum
+    val result = ByteArrayOutputStream(content.size + 20)
+    result.write(content)
+    result.write(checksum)
+    return result.toByteArray()
   }
 
   // ─── Git index parser ─────────────────────────────────────────────

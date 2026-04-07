@@ -188,6 +188,24 @@ interface IExternalStorageModule {
    * @returns JSON string: `[{"path":"tiddlers/foo.tid","type":"add"|"modify"|"delete"}, ...]`
    */
   gitStatus(gitRootDir: string): Promise<string>;
+
+  /**
+   * Debug function returning diagnostic info about the git repository state.
+   * @returns JSON string with root/gitDir/index existence and git dir children
+   */
+  gitStatusDebug(gitRootDir: string): Promise<string>;
+
+  /**
+   * Build `.git/index` natively by reading the HEAD tree from pack files,
+   * stat'ing all files on disk, and writing a v2 index file.
+   *
+   * This is used after archive clone where TidGi Desktop's tar export
+   * doesn't include `.git/index`.
+   *
+   * @param gitRootDir The root directory of the git repository (parent of .git/)
+   * @returns JSON string: `{"ok":true,"entries":N,"indexSize":M}` or `{"ok":false,"error":"..."}`
+   */
+  buildGitIndex(gitRootDir: string): Promise<string>;
 }
 
 export const ExternalStorage: IExternalStorageModule = new Proxy({} as IExternalStorageModule, {
