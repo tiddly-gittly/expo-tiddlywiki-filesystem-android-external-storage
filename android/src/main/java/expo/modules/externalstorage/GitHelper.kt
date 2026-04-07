@@ -228,6 +228,11 @@ internal object GitHelper {
 
   // ─── Private helpers ─────────────────────────────────────────────
 
+  /** Extensions recognized as wiki content (matches JS-side filter) */
+  private val TRACKED_EXTENSIONS = setOf(
+    ".tid", ".json", ".meta", ".txt", ".css", ".js", ".html", ".svg", ".md"
+  )
+
   private fun walkWorkDir(dir: File, prefix: String, skipDirs: Set<String>, files: MutableSet<String>) {
     val children = dir.listFiles() ?: return
     for (child in children) {
@@ -235,7 +240,12 @@ internal object GitHelper {
       if (child.isDirectory) {
         if (child.name !in skipDirs) walkWorkDir(child, relPath, skipDirs, files)
       } else {
-        files.add(relPath)
+        val dotIdx = child.name.lastIndexOf('.')
+        val ext = if (dotIdx >= 0) child.name.substring(dotIdx) else ""
+        // Include files with recognized extensions, or files without an extension
+        if (ext.isEmpty() || ext in TRACKED_EXTENSIONS) {
+          files.add(relPath)
+        }
       }
     }
   }
