@@ -794,10 +794,13 @@ class ExternalStorageModule : Module() {
         fun walkTree(sha: String, prefix: String) {
           val treeBytes = readGitObject(gitDir, sha)
             ?: throw Exception("Cannot read tree object: $sha")
-          parseTreeEntries(treeBytes).forEach { (name, entryMode, entrySha) ->
+          for (triple in parseTreeEntries(treeBytes)) {
+            val name = triple.first
+            val entryMode = triple.second
+            val entrySha = triple.third
             val fullPath = if (prefix.isEmpty()) name else "$prefix/$name"
-            if (entryMode == 0x4000 || entryMode == 0o40000) {
-              // Directory — recurse
+            if (entryMode == 16384) {
+              // Directory (mode 040000 octal = 16384 decimal) — recurse
               walkTree(bytesToHex(entrySha), fullPath)
             } else {
               entries.add(GitTreeEntry(fullPath, entryMode, entrySha))
