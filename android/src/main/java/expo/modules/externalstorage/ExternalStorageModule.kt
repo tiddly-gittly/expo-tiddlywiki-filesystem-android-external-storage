@@ -1488,7 +1488,7 @@ class ExternalStorageModule : Module() {
       // dev, ino (0 — not available on Android)
       writeInt32(0)
       writeInt32(0)
-      // mode: entry.mode is octal (e.g., 0o100644), needs to be stored as-is
+      // mode
       writeInt32(entry.mode)
       // uid, gid (0)
       writeInt32(0)
@@ -1505,8 +1505,6 @@ class ExternalStorageModule : Module() {
       // path + NUL + padding to 8-byte boundary
       baos.write(pathBytes)
       baos.write(0) // NUL terminator
-      // Pad to 8-byte boundary (entry starts at header end or previous entry end)
-      // Total entry size so far = 62 + pathBytes.size + 1
       val entrySize = 62 + pathBytes.size + 1
       val padding = (8 - (entrySize % 8)) % 8
       for (i in 0 until padding) {
@@ -1543,53 +1541,33 @@ class ExternalStorageModule : Module() {
    * Parse a git index file (versions 2, 3, 4).
    *
    * Format reference: https://git-scm.com/docs/index-format
-   *
-   * We only extract the fields needed for stat-cache comparison:
-   * file path, file size, and mtime (seconds).
    */
   private fun parseGitIndex(indexFile: File): List<GitIndexEntry> {
     val bytes = indexFile.readBytes()
     if (bytes.size < 12) return emptyList()
 
-    // Header: 4-byte signature "DIRC"
     val sig = String(bytes, 0, 4, Charsets.US_ASCII)
     if (sig != "DIRC") return emptyList()
 
-    // 4-byte version number
     val version = readInt32(bytes, 4)
     if (version !in 2..4) return emptyList()
 
-    // 4-byte number of entries
     val entryCount = readInt32(bytes, 8)
     val entries = ArrayList<GitIndexEntry>(entryCount)
 
-    var offset = 12 // start of first entry
+    var offset = 12
 
     for (i in 0 until entryCount) {
-      if (offset + 62 > bytes.size) break // minimum entry size
+      if (offset + 62 > bytes.size) break
 
-      // Offset 0: 32-bit ctime seconds (skip)
-      // Offset 4: 32-bit ctime nanoseconds (skip)
-      // Offset 8: 32-bit mtime seconds
       val mtimeSeconds = readInt32(bytes, offset + 8).toLong() and 0xFFFFFFFFL
-      // Offset 12: 32-bit mtime nanoseconds (skip)
-      // Offset 16: 32-bit dev (skip)
-      // Offset 20: 32-bit ino (skip)
-      // Offset 24: 32-bit mode (skip)
-      // Offset 28: 32-bit uid (skip)
-      // Offset 32: 32-bit gid (skip)
-      // Offset 36: 32-bit file size
       val fileSize = readInt32(bytes, offset + 36).toLong() and 0xFFFFFFFFL
-      // Offset 40: 160-bit (20 bytes) SHA-1 (skip)
-      // Offset 60: 16-bit flags
       val flags = readInt16(bytes, offset + 60)
       val nameLength = flags and 0xFFF
 
-      // The path starts at offset 62
       val pathStart = offset + 62
       val pathEnd: Int
       if (nameLength == 0xFFF) {
-        // Name is longer than 0xFFF — find the NUL terminator
         var nullPos = pathStart
         while (nullPos < bytes.size && bytes[nullPos] != 0.toByte()) nullPos++
         pathEnd = nullPos
@@ -1605,17 +1583,12 @@ class ExternalStorageModule : Module() {
 
       entries.add(GitIndexEntry(path = path, size = fileSize, mtimeSeconds = mtimeSeconds))
 
-      // Entry is padded to a multiple of 8 bytes (from the start of the entry).
-      // Total entry bytes = 62 + pathLength + 1 (NUL), rounded up to 8.
       if (version < 4) {
         val entryLength = 62 + (pathEnd - pathStart) + 1
         val paddedLength = (entryLength + 7) and 7.inv()
         offset += paddedLength
       } else {
-        // Version 4 uses prefix compression — path is stored differently.
-        // For simplicity, fall back to NUL scanning.
         var nextOffset = pathEnd + 1
-        // No padding in v4
         offset = nextOffset
       }
     }
