@@ -228,10 +228,8 @@ internal object GitHelper {
 
   // ─── Private helpers ─────────────────────────────────────────────
 
-  /** Extensions recognized as wiki content (matches JS-side filter) */
-  private val TRACKED_EXTENSIONS = setOf(
-    ".tid", ".json", ".meta", ".txt", ".css", ".js", ".html", ".svg", ".md"
-  )
+  /** Pattern for isomorphic-git pack cache files (40-hex-char SHA + .data) */
+  private val PACK_CACHE_PATTERN = Regex("^[0-9a-f]{40}\\.data$")
 
   private fun walkWorkDir(dir: File, prefix: String, skipDirs: Set<String>, files: MutableSet<String>) {
     val children = dir.listFiles() ?: return
@@ -240,10 +238,8 @@ internal object GitHelper {
       if (child.isDirectory) {
         if (child.name !in skipDirs) walkWorkDir(child, relPath, skipDirs, files)
       } else {
-        val dotIdx = child.name.lastIndexOf('.')
-        val ext = if (dotIdx >= 0) child.name.substring(dotIdx) else ""
-        // Include files with recognized extensions, or files without an extension
-        if (ext.isEmpty() || ext in TRACKED_EXTENSIONS) {
+        // Skip isomorphic-git pack cache files (temp files, not wiki content)
+        if (!PACK_CACHE_PATTERN.matches(child.name)) {
           files.add(relPath)
         }
       }
