@@ -1,0 +1,48 @@
+name: Build Check
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  kotlin-compile:
+    runs-on: ubuntu-latest
+    name: Verify Kotlin compilation
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Create minimal Expo host app
+        run: |
+          cd /tmp
+          npx create-expo-app@latest host-app --template blank --no-install
+          cd host-app
+          npm install
+          npm install $GITHUB_WORKSPACE
+
+      - name: Prebuild Android project
+        working-directory: /tmp/host-app
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Compile Kotlin (debug)
+        working-directory: /tmp/host-app/android
+        run: |
+          # Find the exact Gradle module name for our library
+          MODULE=$(grep -r 'expo-tiddlywiki' settings.gradle* | head -1 | sed "s/.*'\\(.*\\)'.*/\\1/" || echo "")
+          echo "Detected module: $MODULE"
+          if [ -n "$MODULE" ]; then
+            ./gradlew ":${MODULE}:compileDebugKotlin" --no-daemon
+          else
+            echo "Module not found in settings, trying full compile..."
+            ./gradlew compileDebugKotlin --no-daemon 2>&1 | tail -200
+          fi
