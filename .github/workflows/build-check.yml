@@ -28,7 +28,15 @@ jobs:
           npx --yes create-expo-app@latest host-app --template blank --no-install
           cd host-app
           npm install
-          npm install --ignore-scripts $GITHUB_WORKSPACE
+          # Copy the module into node_modules manually to avoid prepare script
+          MODULE_DIR=node_modules/expo-tiddlywiki-filesystem-android-external-storage
+          mkdir -p "$MODULE_DIR"
+          cp -r $GITHUB_WORKSPACE/android "$MODULE_DIR/"
+          cp $GITHUB_WORKSPACE/expo-module.config.json "$MODULE_DIR/"
+          cp $GITHUB_WORKSPACE/package.json "$MODULE_DIR/"
+          # Create minimal JS entry so node can resolve the module
+          mkdir -p "$MODULE_DIR/build"
+          echo "module.exports = {};" > "$MODULE_DIR/build/index.js"
 
       - name: Prebuild Android project
         working-directory: /tmp/host-app
