@@ -463,6 +463,35 @@ class ExternalStorageModule : Module() {
             continue
           }
 
+          // Handle POSIX pax extended header (type 'x' or 'g')
+          // pax headers contain key=value pairs, including "path" for long filenames
+          if (typeFlag == 'x' || typeFlag == 'g') {
+            val paxBuf = ByteArray(fileSize.toInt())
+            readFully(bis, paxBuf)
+            val paxStr = String(paxBuf, Charsets.UTF_8)
+            // Parse pax records: each record is "<length> <key>=<value>\n"
+            var paxPos = 0
+            while (paxPos < paxStr.length) {
+              val spaceAt = paxStr.indexOf(' ', paxPos)
+              if (spaceAt < 0) break
+              val recLen = paxStr.substring(paxPos, spaceAt).toIntOrNull() ?: break
+              val record = paxStr.substring(spaceAt + 1, minOf(paxPos + recLen, paxStr.length)).trimEnd('\n')
+              val eqAt = record.indexOf('=')
+              if (eqAt >= 0) {
+                val key = record.substring(0, eqAt)
+                val value = record.substring(eqAt + 1)
+                if (key == "path") {
+                  longName = value
+                }
+              }
+              paxPos += recLen
+            }
+            // Skip padding to 512-byte boundary
+            val remainder = (512 - (fileSize % 512).toInt()) % 512
+            if (remainder > 0) bis.skip(remainder.toLong())
+            continue
+          }
+
           // Determine the file name
           val fileName = longName ?: if (prefix.isNotEmpty()) "$prefix/$rawName" else rawName
           longName = null
