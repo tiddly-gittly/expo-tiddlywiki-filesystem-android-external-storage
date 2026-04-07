@@ -25,10 +25,10 @@ jobs:
       - name: Create minimal Expo host app
         run: |
           cd /tmp
-          npx create-expo-app@latest host-app --template blank --no-install
+          npx --yes create-expo-app@latest host-app --template blank --no-install
           cd host-app
           npm install
-          npm install $GITHUB_WORKSPACE
+          npm install --ignore-scripts $GITHUB_WORKSPACE
 
       - name: Prebuild Android project
         working-directory: /tmp/host-app
