@@ -759,80 +759,7 @@ class ExternalStorageModule : Module() {
      * @return JSON string with status: {"ok":true,"entries":N} or {"ok":false,"error":"..."}
      */
     AsyncFunction("buildGitIndex") { gitRootDir: String ->
-      val root = File(gitRootDir)
-      val gitDir = File(root, ".git")
-      if (!gitDir.isDirectory) throw Exception("Not a git repository: $gitRootDir")
-
-      try {
-        // 1. Resolve HEAD to a commit SHA
-        val headFile = File(gitDir, "HEAD")
-        val headContent = headFile.readText(Charsets.UTF_8).trim()
-        val commitSha: String = if (headContent.startsWith("ref: ")) {
-          val refPath = headContent.removePrefix("ref: ")
-          val refFile = File(gitDir, refPath)
-          if (refFile.exists()) {
-            refFile.readText(Charsets.UTF_8).trim()
-          } else {
-            // Try packed-refs
-            resolvePackedRef(gitDir, refPath)
-              ?: throw Exception("Cannot resolve HEAD ref: $refPath")
-          }
-        } else {
-          headContent // Detached HEAD — already a SHA
-        }
-        android.util.Log.i("BuildGitIndex", "HEAD commit: $commitSha")
-
-        // 2. Read the commit object → get tree SHA
-        val commitBytes = readGitObject(gitDir, commitSha)
-          ?: throw Exception("Cannot read commit object: $commitSha")
-        val treeSha = parseCommitTreeSha(commitBytes)
-          ?: throw Exception("Cannot find tree SHA in commit: $commitSha")
-        android.util.Log.i("BuildGitIndex", "Root tree: $treeSha")
-
-        // 3. Walk the tree recursively → collect all entries
-        val entries = mutableListOf<GitTreeEntry>()
-        fun walkTree(sha: String, prefix: String) {
-          val treeBytes = readGitObject(gitDir, sha)
-            ?: throw Exception("Cannot read tree object: $sha")
-          for (triple in parseTreeEntries(treeBytes)) {
-            val name = triple.first
-            val entryMode = triple.second
-            val entrySha = triple.third
-            val fullPath = if (prefix.isEmpty()) name else "$prefix/$name"
-            if (entryMode == 16384) {
-              // Directory (mode 040000 octal = 16384 decimal) — recurse
-              walkTree(bytesToHex(entrySha), fullPath)
-            } else {
-              entries.add(GitTreeEntry(fullPath, entryMode, entrySha))
-            }
-          }
-        }
-        walkTree(treeSha, "")
-        android.util.Log.i("BuildGitIndex", "Tree walk found ${entries.size} entries")
-
-        // 4. Sort entries by path (git index requires sorted order)
-        entries.sortBy { it.path }
-
-        // 5. Build the binary index
-        val indexBytes = buildIndexBinary(root, entries)
-
-        // 6. Write to .git/index
-        val indexFile = File(gitDir, "index")
-        indexFile.writeBytes(indexBytes)
-        android.util.Log.i("BuildGitIndex", "Wrote index: ${indexBytes.size} bytes, ${entries.size} entries")
-
-        val result = JSONObject()
-        result.put("ok", true)
-        result.put("entries", entries.size)
-        result.put("indexSize", indexBytes.size)
-        result.toString()
-      } catch (e: Exception) {
-        android.util.Log.e("BuildGitIndex", "Failed: ${e.message}", e)
-        val result = JSONObject()
-        result.put("ok", false)
-        result.put("error", e.message ?: "Unknown error")
-        result.toString()
-      }
+      doBuildGitIndex(gitRootDir)
     }
 
     // ─── TiddlyWiki batch file parsing ─────────────────────────────────
@@ -1152,6 +1079,92 @@ class ExternalStorageModule : Module() {
       val n = stream.skip(totalBytes - skipped)
       if (n <= 0) break
       skipped += n
+    }
+  }
+
+  // ─── Build git index from HEAD tree ──────────────────────────────
+
+  /**
+   * Build .git/index natively by reading HEAD tree from pack files
+   * and stat'ing files on disk. Returns JSON result string.
+   */
+  private fun doBuildGitIndex(gitRootDir: String): String {
+    val root = File(gitRootDir)
+    val gitDir = File(root, ".git")
+    if (!gitDir.isDirectory) throw Exception("Not a git repository: $gitRootDir")
+
+    try {
+      // 1. Resolve HEAD to a commit SHA
+      val headFile = File(gitDir, "HEAD")
+      val headContent = headFile.readText(Charsets.UTF_8).trim()
+      val commitSha: String = if (headContent.startsWith("ref: ")) {
+        val refPath = headContent.removePrefix("ref: ")
+        val refFile = File(gitDir, refPath)
+        if (refFile.exists()) {
+          refFile.readText(Charsets.UTF_8).trim()
+        } else {
+          resolvePackedRef(gitDir, refPath)
+            ?: throw Exception("Cannot resolve HEAD ref: $refPath")
+        }
+      } else {
+        headContent
+      }
+      android.util.Log.i("BuildGitIndex", "HEAD commit: $commitSha")
+
+      // 2. Read the commit object -> get tree SHA
+      val commitBytes = readGitObject(gitDir, commitSha)
+        ?: throw Exception("Cannot read commit object: $commitSha")
+      val treeSha = parseCommitTreeSha(commitBytes)
+        ?: throw Exception("Cannot find tree SHA in commit: $commitSha")
+      android.util.Log.i("BuildGitIndex", "Root tree: $treeSha")
+
+      // 3. Walk the tree recursively -> collect all entries
+      val entries = mutableListOf<GitTreeEntry>()
+      walkTreeRecursive(gitDir, treeSha, "", entries)
+      android.util.Log.i("BuildGitIndex", "Tree walk found ${entries.size} entries")
+
+      // 4. Sort entries by path (git index requires sorted order)
+      entries.sortBy { it.path }
+
+      // 5. Build the binary index
+      val indexBytes = buildIndexBinary(root, entries)
+
+      // 6. Write to .git/index
+      val indexFile = File(gitDir, "index")
+      indexFile.writeBytes(indexBytes)
+      android.util.Log.i("BuildGitIndex", "Wrote index: ${indexBytes.size} bytes, ${entries.size} entries")
+
+      val result = JSONObject()
+      result.put("ok", true)
+      result.put("entries", entries.size)
+      result.put("indexSize", indexBytes.size)
+      return result.toString()
+    } catch (e: Exception) {
+      android.util.Log.e("BuildGitIndex", "Failed: ${e.message}", e)
+      val result = JSONObject()
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown error")
+      return result.toString()
+    }
+  }
+
+  /** Recursively walk a git tree object, collecting blob entries. */
+  private fun walkTreeRecursive(
+    gitDir: File, treeSha: String, prefix: String, entries: MutableList<GitTreeEntry>
+  ) {
+    val treeBytes = readGitObject(gitDir, treeSha)
+      ?: throw Exception("Cannot read tree object: $treeSha")
+    for (triple in parseTreeEntries(treeBytes)) {
+      val name = triple.first
+      val entryMode = triple.second
+      val entrySha = triple.third
+      val fullPath = if (prefix.isEmpty()) name else "$prefix/$name"
+      if (entryMode == 16384) {
+        // Directory (mode 040000 octal = 16384 decimal)
+        walkTreeRecursive(gitDir, bytesToHex(entrySha), fullPath, entries)
+      } else {
+        entries.add(GitTreeEntry(fullPath, entryMode, entrySha))
+      }
     }
   }
 
