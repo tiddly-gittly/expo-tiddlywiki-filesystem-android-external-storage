@@ -228,9 +228,6 @@ internal object GitHelper {
 
   // ─── Private helpers ─────────────────────────────────────────────
 
-  /** Pattern for isomorphic-git pack cache files (40-hex-char SHA + .data) */
-  private val PACK_CACHE_PATTERN = Regex("^[0-9a-f]{40}\\.data$")
-
   private fun walkWorkDir(dir: File, prefix: String, skipDirs: Set<String>, files: MutableSet<String>) {
     val children = dir.listFiles() ?: return
     for (child in children) {
@@ -238,10 +235,7 @@ internal object GitHelper {
       if (child.isDirectory) {
         if (child.name !in skipDirs) walkWorkDir(child, relPath, skipDirs, files)
       } else {
-        // Skip isomorphic-git pack cache files (temp files, not wiki content)
-        if (!PACK_CACHE_PATTERN.matches(child.name)) {
-          files.add(relPath)
-        }
+        files.add(relPath)
       }
     }
   }
