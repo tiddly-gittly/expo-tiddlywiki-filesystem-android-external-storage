@@ -231,6 +231,17 @@ interface IExternalStorageModule {
    * @returns JSON string: `{"ok":true,"updates":[...]}` or `{"ok":false,"error":"..."}`
    */
   gitFetch(gitRootDir: string, remoteName: string, branch: string, headers?: string | null): Promise<string>;
+
+  /**
+   * Compare two commits and checkout only changed/new files to the working tree.
+   * Avoids full checkout which OOMs on large repos.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param oldOid      Old commit SHA (before fetch)
+   * @param newOid      New commit SHA (after fetch)
+   * @returns JSON string: `{"ok":true,"count":N,"files":[...]}` or `{"ok":false,"error":"..."}`
+   */
+  gitCheckoutChangedFiles(gitRootDir: string, oldOid: string, newOid: string): Promise<string>;
 }
 
 export const ExternalStorage: IExternalStorageModule = new Proxy({} as IExternalStorageModule, {

@@ -572,6 +572,10 @@ class ExternalStorageModule : Module() {
       GitHelper.gitFetch(gitRootDir, remoteName, branch, headers)
     }
 
+    AsyncFunction("gitCheckoutChangedFiles") { gitRootDir: String, oldOid: String, newOid: String ->
+      GitHelper.gitCheckoutChangedFiles(gitRootDir, oldOid, newOid)
+    }
+
     // ─── TiddlyWiki batch file parsing ─────────────────────────────────
 
     /**

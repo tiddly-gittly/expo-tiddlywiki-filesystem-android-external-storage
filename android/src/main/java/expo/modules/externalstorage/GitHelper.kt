@@ -782,4 +782,114 @@ internal object GitHelper {
     }
     return result.toString()
   }
+
+  /**
+   * Compare two commits and checkout only changed/new files to the working tree.
+   * This avoids full checkout which OOMs on large repos.
+   *
+   * @param gitRootDir  absolute path to the git working directory
+   * @param oldOid      the old commit SHA (before fetch)
+   * @param newOid      the new commit SHA (after fetch)
+   * @return JSON string with result info including list of updated files
+   */
+  fun gitCheckoutChangedFiles(
+    gitRootDir: String,
+    oldOid: String,
+    newOid: String
+  ): String {
+    val result = JSONObject()
+    try {
+      val root = File(gitRootDir)
+      val git = org.eclipse.jgit.api.Git.open(root)
+      try {
+        val repo = git.repository
+        val reader = repo.newObjectReader()
+        try {
+          val oldTree = org.eclipse.jgit.revwalk.RevWalk(repo).use { walk ->
+            walk.parseCommit(org.eclipse.jgit.lib.ObjectId.fromString(oldOid)).tree
+          }
+          val newTree = org.eclipse.jgit.revwalk.RevWalk(repo).use { walk ->
+            walk.parseCommit(org.eclipse.jgit.lib.ObjectId.fromString(newOid)).tree
+          }
+
+          // Diff the two trees
+          val diffFormatter = org.eclipse.jgit.diff.DiffFormatter(java.io.ByteArrayOutputStream())
+          diffFormatter.setRepository(repo)
+          val diffs = diffFormatter.scan(oldTree, newTree)
+
+          val updatedFiles = JSONArray()
+          var checkedOutCount = 0
+
+          for (diff in diffs) {
+            val changeType = diff.changeType
+            val newPath = diff.newPath
+            val oldPath = diff.oldPath
+
+            when (changeType) {
+              org.eclipse.jgit.diff.DiffEntry.ChangeType.ADD,
+              org.eclipse.jgit.diff.DiffEntry.ChangeType.MODIFY,
+              org.eclipse.jgit.diff.DiffEntry.ChangeType.COPY -> {
+                // Write the new file content from the new tree
+                val treeWalk = org.eclipse.jgit.treewalk.TreeWalk.forPath(repo, newPath, newTree)
+                if (treeWalk != null) {
+                  val objectId = treeWalk.getObjectId(0)
+                  val loader = reader.open(objectId)
+                  val targetFile = File(root, newPath)
+                  targetFile.parentFile?.mkdirs()
+                  targetFile.outputStream().use { out ->
+                    loader.copyTo(out)
+                  }
+                  updatedFiles.put(newPath)
+                  checkedOutCount++
+                }
+              }
+              org.eclipse.jgit.diff.DiffEntry.ChangeType.DELETE -> {
+                val targetFile = File(root, oldPath)
+                if (targetFile.exists()) {
+                  targetFile.delete()
+                }
+                updatedFiles.put("-$oldPath")
+                checkedOutCount++
+              }
+              org.eclipse.jgit.diff.DiffEntry.ChangeType.RENAME -> {
+                // Delete old, write new
+                val oldFile = File(root, oldPath)
+                if (oldFile.exists()) {
+                  oldFile.delete()
+                }
+                val treeWalk = org.eclipse.jgit.treewalk.TreeWalk.forPath(repo, newPath, newTree)
+                if (treeWalk != null) {
+                  val objectId = treeWalk.getObjectId(0)
+                  val loader = reader.open(objectId)
+                  val targetFile = File(root, newPath)
+                  targetFile.parentFile?.mkdirs()
+                  targetFile.outputStream().use { out ->
+                    loader.copyTo(out)
+                  }
+                }
+                updatedFiles.put("$oldPath->$newPath")
+                checkedOutCount++
+              }
+            }
+          }
+
+          diffFormatter.close()
+
+          result.put("ok", true)
+          result.put("count", checkedOutCount)
+          result.put("files", updatedFiles)
+          android.util.Log.i("GitCheckout", "Checked out $checkedOutCount changed files between $oldOid..$newOid")
+        } finally {
+          reader.close()
+        }
+      } finally {
+        git.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown checkout error")
+      android.util.Log.e("GitCheckout", "Checkout changed files failed: ${e.message}", e)
+    }
+    return result.toString()
+  }
 }
