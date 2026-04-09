@@ -643,4 +643,143 @@ internal object GitHelper {
     return ((bytes[offset].toInt() and 0xFF) shl 8) or
       (bytes[offset + 1].toInt() and 0xFF)
   }
+
+  // ─── JGit push/fetch ──────────────────────────────────────────
+
+  /**
+   * Push local branch to remote using JGit (efficient native pack building).
+   * @param gitRootDir  absolute path to the git working directory
+   * @param remoteName  remote name (e.g. "origin")
+   * @param localBranch local branch name (e.g. "main")
+   * @param remoteBranch remote branch ref (e.g. "refs/heads/mobile-incoming")
+   * @param force       whether to force push
+   * @param headers     optional HTTP headers as JSON object string
+   * @return JSON string with result info
+   */
+  fun gitPush(
+    gitRootDir: String,
+    remoteName: String,
+    localBranch: String,
+    remoteBranch: String,
+    force: Boolean,
+    headers: String?
+  ): String {
+    val result = JSONObject()
+    try {
+      val root = File(gitRootDir)
+      val git = org.eclipse.jgit.api.Git.open(root)
+      try {
+        val pushCommand = git.push()
+          .setRemote(remoteName)
+          .setRefSpecs(org.eclipse.jgit.transport.RefSpec("refs/heads/$localBranch:$remoteBranch"))
+          .setForce(force)
+
+        // Set custom HTTP headers if provided
+        if (headers != null) {
+          try {
+            val headerObj = JSONObject(headers)
+            val headerMap = mutableMapOf<String, String>()
+            for (key in headerObj.keys()) {
+              headerMap[key] = headerObj.getString(key)
+            }
+            // JGit supports custom transport configuration
+            pushCommand.setTransportConfigCallback { transport ->
+              if (transport is org.eclipse.jgit.transport.http.HttpTransport) {
+                transport.additionalHeaders = headerMap
+              }
+            }
+          } catch (e: Exception) {
+            android.util.Log.w("GitPush", "Failed to parse headers: ${e.message}")
+          }
+        }
+
+        val pushResults = pushCommand.call()
+
+        val resultsArray = JSONArray()
+        for (pushResult in pushResults) {
+          for (update in pushResult.remoteUpdates) {
+            val updateObj = JSONObject()
+            updateObj.put("remoteName", update.remoteName)
+            updateObj.put("status", update.status.name)
+            updateObj.put("message", update.message ?: "")
+            resultsArray.put(updateObj)
+          }
+        }
+
+        result.put("ok", true)
+        result.put("updates", resultsArray)
+      } finally {
+        git.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown push error")
+      android.util.Log.e("GitPush", "Push failed: ${e.message}", e)
+    }
+    return result.toString()
+  }
+
+  /**
+   * Fetch from remote using JGit (efficient native pack handling).
+   * @param gitRootDir  absolute path to the git working directory
+   * @param remoteName  remote name (e.g. "origin")
+   * @param branch      branch to fetch
+   * @param headers     optional HTTP headers as JSON object string
+   * @return JSON string with result info
+   */
+  fun gitFetch(
+    gitRootDir: String,
+    remoteName: String,
+    branch: String,
+    headers: String?
+  ): String {
+    val result = JSONObject()
+    try {
+      val root = File(gitRootDir)
+      val git = org.eclipse.jgit.api.Git.open(root)
+      try {
+        val fetchCommand = git.fetch()
+          .setRemote(remoteName)
+          .setRefSpecs(org.eclipse.jgit.transport.RefSpec("+refs/heads/$branch:refs/remotes/$remoteName/$branch"))
+
+        if (headers != null) {
+          try {
+            val headerObj = JSONObject(headers)
+            val headerMap = mutableMapOf<String, String>()
+            for (key in headerObj.keys()) {
+              headerMap[key] = headerObj.getString(key)
+            }
+            fetchCommand.setTransportConfigCallback { transport ->
+              if (transport is org.eclipse.jgit.transport.http.HttpTransport) {
+                transport.additionalHeaders = headerMap
+              }
+            }
+          } catch (e: Exception) {
+            android.util.Log.w("GitFetch", "Failed to parse headers: ${e.message}")
+          }
+        }
+
+        val fetchResult = fetchCommand.call()
+
+        val updatesArray = JSONArray()
+        for ((refName, update) in fetchResult.trackingRefUpdates.associate { it.localName to it }) {
+          val updateObj = JSONObject()
+          updateObj.put("ref", refName)
+          updateObj.put("oldObjectId", update.oldObjectId?.name ?: "")
+          updateObj.put("newObjectId", update.newObjectId?.name ?: "")
+          updatesArray.put(updateObj)
+        }
+
+        result.put("ok", true)
+        result.put("updates", updatesArray)
+      } finally {
+        git.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown fetch error")
+      android.util.Log.e("GitFetch", "Fetch failed: ${e.message}", e)
+    }
+    return result.toString()
+  }
 }

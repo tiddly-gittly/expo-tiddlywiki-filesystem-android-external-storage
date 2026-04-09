@@ -564,6 +564,14 @@ class ExternalStorageModule : Module() {
       GitHelper.buildGitIndex(gitRootDir)
     }
 
+    AsyncFunction("gitPush") { gitRootDir: String, remoteName: String, localBranch: String, remoteBranch: String, force: Boolean, headers: String? ->
+      GitHelper.gitPush(gitRootDir, remoteName, localBranch, remoteBranch, force, headers)
+    }
+
+    AsyncFunction("gitFetch") { gitRootDir: String, remoteName: String, branch: String, headers: String? ->
+      GitHelper.gitFetch(gitRootDir, remoteName, branch, headers)
+    }
+
     // ─── TiddlyWiki batch file parsing ─────────────────────────────────
 
     /**

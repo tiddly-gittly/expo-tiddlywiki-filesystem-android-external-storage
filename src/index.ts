@@ -206,6 +206,31 @@ interface IExternalStorageModule {
    * @returns JSON string: `{"ok":true,"entries":N,"indexSize":M}` or `{"ok":false,"error":"..."}`
    */
   buildGitIndex(gitRootDir: string): Promise<string>;
+
+  /**
+   * Push local branch to remote using native JGit (efficient pack building).
+   * Avoids OOM from isomorphic-git's JS-based pack construction on large repos.
+   *
+   * @param gitRootDir   Absolute path to the git working directory
+   * @param remoteName   Remote name (e.g. "origin")
+   * @param localBranch  Local branch name (e.g. "main")
+   * @param remoteBranch Remote branch ref (e.g. "refs/heads/mobile-incoming")
+   * @param force        Whether to force push
+   * @param headers      Optional HTTP headers as JSON string
+   * @returns JSON string: `{"ok":true,"updates":[...]}` or `{"ok":false,"error":"..."}`
+   */
+  gitPush(gitRootDir: string, remoteName: string, localBranch: string, remoteBranch: string, force: boolean, headers?: string | null): Promise<string>;
+
+  /**
+   * Fetch from remote using native JGit (efficient pack handling).
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param remoteName  Remote name (e.g. "origin")
+   * @param branch      Branch to fetch
+   * @param headers     Optional HTTP headers as JSON string
+   * @returns JSON string: `{"ok":true,"updates":[...]}` or `{"ok":false,"error":"..."}`
+   */
+  gitFetch(gitRootDir: string, remoteName: string, branch: string, headers?: string | null): Promise<string>;
 }
 
 export const ExternalStorage: IExternalStorageModule = new Proxy({} as IExternalStorageModule, {

@@ -12,6 +12,15 @@ android {
     versionCode 1
     versionName '0.1.0'
   }
+  // JGit needs Java 11+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_11
+    targetCompatibility JavaVersion.VERSION_11
+  }
+}
+
+dependencies {
+  implementation 'org.eclipse.jgit:org.eclipse.jgit:6.10.0.202406032230-r'
 }
 
 dependencies {
