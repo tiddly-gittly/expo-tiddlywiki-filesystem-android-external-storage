@@ -19,8 +19,8 @@ let _module: IExternalStorageModule | undefined;
  */
 function getNativeModule(): IExternalStorageModule {
   if (_module) return _module;
-  if (Platform.OS !== 'android') {
-    throw new Error('ExternalStorage native module is only available on Android');
+  if (Platform.OS !== 'android' && Platform.OS !== 'ios') {
+    throw new Error('ExternalStorage native module is only available on Android and iOS');
   }
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { requireNativeModule } = require('expo-modules-core') as { requireNativeModule: (name: string) => IExternalStorageModule };
