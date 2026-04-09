@@ -682,10 +682,10 @@ internal object GitHelper {
             for (key in headerObj.keys()) {
               headerMap[key] = headerObj.getString(key)
             }
-            // JGit supports custom transport configuration
+            // JGit supports custom transport configuration via TransportHttp
             pushCommand.setTransportConfigCallback { transport ->
-              if (transport is org.eclipse.jgit.transport.http.HttpTransport) {
-                transport.additionalHeaders = headerMap
+              if (transport is org.eclipse.jgit.transport.TransportHttp) {
+                transport.setAdditionalHeaders(headerMap)
               }
             }
           } catch (e: Exception) {
@@ -750,8 +750,8 @@ internal object GitHelper {
               headerMap[key] = headerObj.getString(key)
             }
             fetchCommand.setTransportConfigCallback { transport ->
-              if (transport is org.eclipse.jgit.transport.http.HttpTransport) {
-                transport.additionalHeaders = headerMap
+              if (transport is org.eclipse.jgit.transport.TransportHttp) {
+                transport.setAdditionalHeaders(headerMap)
               }
             }
           } catch (e: Exception) {
