@@ -17,6 +17,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import android.util.Base64
 
 /**
  * All git-related operations using JGit — a pure Java implementation of Git.
@@ -545,6 +546,456 @@ internal object GitHelper {
       result.put("ok", false)
       result.put("error", e.message ?: "Unknown reset error")
       android.util.Log.e("GitReset", "Reset failed: ${e.message}", e)
+    }
+    return result.toString()
+  }
+
+  // ─── Git clone (JGit) ───────────────────────────────────────────
+
+  /**
+   * Clone a remote repository into the specified directory.
+   * Uses JGit's CloneCommand for efficient native pack handling.
+   */
+  fun gitClone(
+    url: String,
+    directory: String,
+    branch: String?,
+    depth: Int,
+    singleBranch: Boolean,
+    noTags: Boolean,
+    headers: String?
+  ): String {
+    val result = JSONObject()
+    try {
+      val targetDir = File(directory)
+      val cloneCommand = Git.cloneRepository()
+        .setURI(url)
+        .setDirectory(targetDir)
+        .setCloneAllBranches(!singleBranch)
+
+      if (singleBranch && branch != null) {
+        cloneCommand.setBranch("refs/heads/$branch")
+        cloneCommand.setBranchesToClone(listOf("refs/heads/$branch"))
+      }
+
+      if (depth > 0) {
+        cloneCommand.setDepth(depth)
+      }
+
+      if (noTags) {
+        cloneCommand.setNoTags()
+      }
+
+      applyHeaders(cloneCommand, headers)
+
+      val git = cloneCommand.call()
+      val headId = git.repository.resolve(Constants.HEAD)
+
+      result.put("ok", true)
+      result.put("head", headId?.name ?: "")
+      android.util.Log.i("GitClone", "Cloned $url to $directory, HEAD=${headId?.name?.take(8)}")
+      git.repository.close()
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown clone error")
+      android.util.Log.e("GitClone", "Clone failed: ${e.message}", e)
+    }
+    return result.toString()
+  }
+
+  // ─── Git log (JGit) ─────────────────────────────────────────────
+
+  /**
+   * Get commit history using JGit's LogCommand.
+   * Returns JSON array of commit objects.
+   */
+  fun gitLog(
+    gitRootDir: String,
+    ref: String?,
+    maxCount: Int
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        val git = Git(repo)
+        val logCommand = git.log()
+
+        if (ref != null && ref.isNotEmpty()) {
+          val resolved = repo.resolve(ref)
+          if (resolved != null) {
+            logCommand.add(resolved)
+          } else {
+            result.put("ok", true)
+            result.put("commits", JSONArray())
+            return result.toString()
+          }
+        } else {
+          logCommand.all()
+        }
+
+        logCommand.setMaxCount(maxCount)
+
+        val commits = JSONArray()
+        for (commit in logCommand.call()) {
+          val obj = JSONObject()
+          obj.put("oid", commit.id.name)
+          obj.put("message", commit.fullMessage)
+          obj.put("authorName", commit.authorIdent.name)
+          obj.put("authorEmail", commit.authorIdent.emailAddress)
+          obj.put("timestamp", commit.authorIdent.`when`.time)
+          val parents = JSONArray()
+          for (parent in commit.parents) {
+            parents.put(parent.id.name)
+          }
+          obj.put("parentOids", parents)
+          commits.put(obj)
+        }
+
+        result.put("ok", true)
+        result.put("commits", commits)
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown log error")
+    }
+    return result.toString()
+  }
+
+  // ─── Git resolve ref (JGit) ─────────────────────────────────────
+
+  /**
+   * Resolve a git reference to its SHA-1 hash.
+   */
+  fun gitResolveRef(
+    gitRootDir: String,
+    ref: String
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        val objectId = repo.resolve(ref)
+        if (objectId != null) {
+          result.put("ok", true)
+          result.put("oid", objectId.name)
+        } else {
+          result.put("ok", false)
+          result.put("error", "Cannot resolve ref: $ref")
+        }
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown error")
+    }
+    return result.toString()
+  }
+
+  // ─── Git current branch (JGit) ──────────────────────────────────
+
+  /**
+   * Get the current branch name.
+   * Returns the branch name or "HEAD" if detached.
+   */
+  fun gitCurrentBranch(gitRootDir: String): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        val branch = repo.branch
+        val fullBranch = repo.fullBranch
+        val isDetached = fullBranch == null || !fullBranch.startsWith("refs/heads/")
+
+        result.put("ok", true)
+        result.put("branch", branch ?: "")
+        result.put("isDetached", isDetached)
+
+        // Also list all branches
+        val git = Git(repo)
+        val localBranches = JSONArray()
+        for (ref in git.branchList().call()) {
+          localBranches.put(ref.name.removePrefix("refs/heads/"))
+        }
+        result.put("localBranches", localBranches)
+
+        val remoteBranches = JSONArray()
+        for (ref in git.branchList().setListMode(org.eclipse.jgit.api.ListBranchCommand.ListMode.REMOTE).call()) {
+          remoteBranches.put(ref.name.removePrefix("refs/remotes/"))
+        }
+        result.put("remoteBranches", remoteBranches)
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown error")
+    }
+    return result.toString()
+  }
+
+  // ─── Git init (JGit) ────────────────────────────────────────────
+
+  /**
+   * Initialize a new git repository.
+   */
+  fun gitInit(
+    directory: String,
+    defaultBranch: String
+  ): String {
+    val result = JSONObject()
+    try {
+      val targetDir = File(directory)
+      targetDir.mkdirs()
+      val git = Git.init()
+        .setDirectory(targetDir)
+        .setInitialBranch(defaultBranch)
+        .call()
+
+      result.put("ok", true)
+      android.util.Log.i("GitInit", "Initialized repo at $directory with branch $defaultBranch")
+      git.repository.close()
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown init error")
+    }
+    return result.toString()
+  }
+
+  // ─── Git config (JGit) ──────────────────────────────────────────
+
+  /**
+   * Set a git config value. Primarily for remote.origin.url.
+   */
+  fun gitSetConfig(
+    gitRootDir: String,
+    section: String,
+    subsection: String?,
+    name: String,
+    value: String
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        val config = repo.config
+        config.setString(section, subsection, name, value)
+        config.save()
+        result.put("ok", true)
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown config error")
+    }
+    return result.toString()
+  }
+
+  /**
+   * Add a remote to the repository.
+   */
+  fun gitAddRemote(
+    gitRootDir: String,
+    remoteName: String,
+    url: String
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        val config = repo.config
+        config.setString("remote", remoteName, "url", url)
+        config.setString("remote", remoteName, "fetch", "+refs/heads/*:refs/remotes/$remoteName/*")
+        config.save()
+        result.put("ok", true)
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown error")
+    }
+    return result.toString()
+  }
+
+  // ─── Git read blob (JGit) ───────────────────────────────────────
+
+  /**
+   * Read a file (blob) at a specific commit reference.
+   * Returns base64-encoded content for binary, or utf8 text.
+   */
+  fun gitReadBlob(
+    gitRootDir: String,
+    ref: String,
+    filepath: String,
+    asBase64: Boolean
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        val commitId = repo.resolve(ref)
+          ?: throw Exception("Cannot resolve ref: $ref")
+        val walk = RevWalk(repo)
+        val commit = walk.parseCommit(commitId)
+        val tree = commit.tree
+
+        val treeWalk = TreeWalk.forPath(repo, filepath, tree)
+        if (treeWalk == null) {
+          result.put("ok", false)
+          result.put("error", "File not found in tree: $filepath at $ref")
+          walk.close()
+          return result.toString()
+        }
+
+        val objectId = treeWalk.getObjectId(0)
+        val loader = repo.newObjectReader().open(objectId)
+        val bytes = loader.bytes
+
+        result.put("ok", true)
+        if (asBase64) {
+          result.put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
+          result.put("encoding", "base64")
+        } else {
+          result.put("content", String(bytes, Charsets.UTF_8))
+          result.put("encoding", "utf8")
+        }
+        result.put("size", bytes.size)
+
+        walk.close()
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown error")
+    }
+    return result.toString()
+  }
+
+  // ─── Git diff trees (JGit) ──────────────────────────────────────
+
+  /**
+   * Diff two commits and return the list of changed files.
+   * This is the native equivalent of diffCommitTrees in JS.
+   */
+  fun gitDiffTrees(
+    gitRootDir: String,
+    oldRef: String,
+    newRef: String
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        val walk = RevWalk(repo)
+        val oldCommit = walk.parseCommit(repo.resolve(oldRef)
+          ?: throw Exception("Cannot resolve ref: $oldRef"))
+        val newCommit = walk.parseCommit(repo.resolve(newRef)
+          ?: throw Exception("Cannot resolve ref: $newRef"))
+
+        val diffFormatter = DiffFormatter(ByteArrayOutputStream())
+        diffFormatter.setRepository(repo)
+        val diffs = diffFormatter.scan(oldCommit.tree, newCommit.tree)
+
+        val files = JSONArray()
+        for (diff in diffs) {
+          val obj = JSONObject()
+          when (diff.changeType) {
+            DiffEntry.ChangeType.ADD -> {
+              obj.put("path", diff.newPath)
+              obj.put("type", "add")
+            }
+            DiffEntry.ChangeType.DELETE -> {
+              obj.put("path", diff.oldPath)
+              obj.put("type", "delete")
+            }
+            DiffEntry.ChangeType.MODIFY -> {
+              obj.put("path", diff.newPath)
+              obj.put("type", "modify")
+            }
+            DiffEntry.ChangeType.RENAME -> {
+              obj.put("path", diff.newPath)
+              obj.put("oldPath", diff.oldPath)
+              obj.put("type", "modify")
+            }
+            DiffEntry.ChangeType.COPY -> {
+              obj.put("path", diff.newPath)
+              obj.put("type", "add")
+            }
+          }
+          files.put(obj)
+        }
+
+        diffFormatter.close()
+        walk.close()
+
+        result.put("ok", true)
+        result.put("files", files)
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown error")
+    }
+    return result.toString()
+  }
+
+  // ─── Git discard file changes (JGit) ────────────────────────────
+
+  /**
+   * Discard changes to a specific file by checking out the HEAD version.
+   * If the file doesn't exist in HEAD (new file), delete it from working tree.
+   */
+  fun gitDiscardFileChanges(
+    gitRootDir: String,
+    filepath: String
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        val git = Git(repo)
+        val headId = repo.resolve(Constants.HEAD)
+
+        if (headId != null) {
+          // Check if file exists in HEAD
+          val walk = RevWalk(repo)
+          val commit = walk.parseCommit(headId)
+          val treeWalk = TreeWalk.forPath(repo, filepath, commit.tree)
+          walk.close()
+
+          if (treeWalk != null) {
+            // File exists in HEAD — checkout it
+            git.checkout()
+              .addPath(filepath)
+              .call()
+            result.put("ok", true)
+            result.put("action", "checkout")
+          } else {
+            // File doesn't exist in HEAD — it's untracked, delete it
+            val targetFile = File(File(gitRootDir), filepath)
+            if (targetFile.exists()) {
+              targetFile.delete()
+            }
+            result.put("ok", true)
+            result.put("action", "delete")
+          }
+        } else {
+          result.put("ok", false)
+          result.put("error", "Cannot resolve HEAD")
+        }
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown error")
     }
     return result.toString()
   }

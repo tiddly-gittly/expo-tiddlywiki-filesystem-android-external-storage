@@ -725,6 +725,68 @@ enum GitHelper {
   static func gitReset(
     gitRootDir: String, ref: String, mode: String
   ) throws -> String {
-    return "{\"ok\":false,\"error\":\"Native git reset not available on iOS (no libgit2). Use isomorphic-git fallback.\"}"
+    return "{\"ok\":false,\"error\":\"Native git reset not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitClone(
+    url: String, directory: String, branch: String?, depth: Int,
+    singleBranch: Bool, noTags: Bool, headers: String?
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git clone not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitLog(
+    gitRootDir: String, ref: String?, maxCount: Int
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git log not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitResolveRef(
+    gitRootDir: String, ref: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git resolveRef not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitCurrentBranch(
+    gitRootDir: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git currentBranch not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitInit(
+    directory: String, defaultBranch: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git init not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitSetConfig(
+    gitRootDir: String, section: String, subsection: String?,
+    name: String, value: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git setConfig not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitAddRemote(
+    gitRootDir: String, remoteName: String, url: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git addRemote not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitReadBlob(
+    gitRootDir: String, ref: String, filepath: String, asBase64: Bool
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git readBlob not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitDiffTrees(
+    gitRootDir: String, oldRef: String, newRef: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git diffTrees not available on iOS (no libgit2).\"}"
+  }
+
+  static func gitDiscardFileChanges(
+    gitRootDir: String, filepath: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git discardFileChanges not available on iOS (no libgit2).\"}"
   }
 }

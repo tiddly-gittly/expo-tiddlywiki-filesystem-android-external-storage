@@ -265,6 +265,110 @@ interface IExternalStorageModule {
    * @returns JSON string: `{"ok":true,"ref":"abc123"}` or `{"ok":false,"error":"..."}`
    */
   gitReset(gitRootDir: string, ref: string, mode: string): Promise<string>;
+
+  /**
+   * Clone a remote repository using native JGit.
+   *
+   * @param url          Remote repository URL
+   * @param directory    Destination directory
+   * @param branch       Branch to clone (null for default)
+   * @param depth        Depth for shallow clone (0 for full)
+   * @param singleBranch Whether to clone only the specified branch
+   * @param noTags       Whether to skip fetching tags
+   * @param headers      Optional HTTP headers as JSON string
+   * @returns JSON string: `{"ok":true,"head":"abc123"}` or `{"ok":false,"error":"..."}`
+   */
+  gitClone(url: string, directory: string, branch: string | null, depth: number, singleBranch: boolean, noTags: boolean, headers?: string | null): Promise<string>;
+
+  /**
+   * Get commit history using native git log.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param ref         Branch or ref to start from (null for all)
+   * @param maxCount    Maximum number of commits to return
+   * @returns JSON string: `{"ok":true,"commits":[{"oid","message","authorName","authorEmail","timestamp","parentOids"}]}`
+   */
+  gitLog(gitRootDir: string, ref: string | null, maxCount: number): Promise<string>;
+
+  /**
+   * Resolve a git reference to its SHA-1 hash.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param ref         Reference to resolve (e.g. "HEAD", "refs/heads/main", "origin/main")
+   * @returns JSON string: `{"ok":true,"oid":"abc123"}` or `{"ok":false,"error":"..."}`
+   */
+  gitResolveRef(gitRootDir: string, ref: string): Promise<string>;
+
+  /**
+   * Get current branch name and branch listings.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @returns JSON string: `{"ok":true,"branch":"main","isDetached":false,"localBranches":[],"remoteBranches":[]}`
+   */
+  gitCurrentBranch(gitRootDir: string): Promise<string>;
+
+  /**
+   * Initialize a new git repository.
+   *
+   * @param directory     Directory to initialize
+   * @param defaultBranch Default branch name (e.g. "main")
+   * @returns JSON string: `{"ok":true}` or `{"ok":false,"error":"..."}`
+   */
+  gitInit(directory: string, defaultBranch: string): Promise<string>;
+
+  /**
+   * Set a git config value.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param section     Config section (e.g. "remote")
+   * @param subsection  Config subsection (e.g. "origin"), null for no subsection
+   * @param name        Config key (e.g. "url")
+   * @param value       Config value
+   * @returns JSON string: `{"ok":true}` or `{"ok":false,"error":"..."}`
+   */
+  gitSetConfig(gitRootDir: string, section: string, subsection: string | null, name: string, value: string): Promise<string>;
+
+  /**
+   * Add a remote to the repository.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param remoteName  Remote name (e.g. "origin")
+   * @param url         Remote URL
+   * @returns JSON string: `{"ok":true}` or `{"ok":false,"error":"..."}`
+   */
+  gitAddRemote(gitRootDir: string, remoteName: string, url: string): Promise<string>;
+
+  /**
+   * Read a file (blob) at a specific commit reference.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param ref         Commit ref to read from
+   * @param filepath    Relative path within the repository
+   * @param asBase64    If true, return content as base64; otherwise as utf8 string
+   * @returns JSON string: `{"ok":true,"content":"...","encoding":"base64"|"utf8","size":N}`
+   */
+  gitReadBlob(gitRootDir: string, ref: string, filepath: string, asBase64: boolean): Promise<string>;
+
+  /**
+   * Diff two commits and return changed files list.
+   * Native equivalent of tree-walking diff.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param oldRef      Old commit ref
+   * @param newRef      New commit ref
+   * @returns JSON string: `{"ok":true,"files":[{"path":"...","type":"add"|"modify"|"delete"}]}`
+   */
+  gitDiffTrees(gitRootDir: string, oldRef: string, newRef: string): Promise<string>;
+
+  /**
+   * Discard uncommitted changes for a specific file.
+   * Checks out the HEAD version, or deletes the file if it's untracked.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param filepath    Relative path of the file to discard
+   * @returns JSON string: `{"ok":true,"action":"checkout"|"delete"}` or `{"ok":false,"error":"..."}`
+   */
+  gitDiscardFileChanges(gitRootDir: string, filepath: string): Promise<string>;
 }
 
 export const ExternalStorage: IExternalStorageModule = new Proxy({} as IExternalStorageModule, {

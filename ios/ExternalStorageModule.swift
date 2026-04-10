@@ -243,6 +243,46 @@ public class ExternalStorageModule: Module {
     AsyncFunction("gitReset") { (gitRootDir: String, ref: String, mode: String) -> String in
       try GitHelper.gitReset(gitRootDir: gitRootDir, ref: ref, mode: mode)
     }
+
+    AsyncFunction("gitClone") { (url: String, directory: String, branch: String?, depth: Int, singleBranch: Bool, noTags: Bool, headers: String?) -> String in
+      try GitHelper.gitClone(url: url, directory: directory, branch: branch, depth: depth, singleBranch: singleBranch, noTags: noTags, headers: headers)
+    }
+
+    AsyncFunction("gitLog") { (gitRootDir: String, ref: String?, maxCount: Int) -> String in
+      try GitHelper.gitLog(gitRootDir: gitRootDir, ref: ref, maxCount: maxCount)
+    }
+
+    AsyncFunction("gitResolveRef") { (gitRootDir: String, ref: String) -> String in
+      try GitHelper.gitResolveRef(gitRootDir: gitRootDir, ref: ref)
+    }
+
+    AsyncFunction("gitCurrentBranch") { (gitRootDir: String) -> String in
+      try GitHelper.gitCurrentBranch(gitRootDir: gitRootDir)
+    }
+
+    AsyncFunction("gitInit") { (directory: String, defaultBranch: String) -> String in
+      try GitHelper.gitInit(directory: directory, defaultBranch: defaultBranch)
+    }
+
+    AsyncFunction("gitSetConfig") { (gitRootDir: String, section: String, subsection: String?, name: String, value: String) -> String in
+      try GitHelper.gitSetConfig(gitRootDir: gitRootDir, section: section, subsection: subsection, name: name, value: value)
+    }
+
+    AsyncFunction("gitAddRemote") { (gitRootDir: String, remoteName: String, url: String) -> String in
+      try GitHelper.gitAddRemote(gitRootDir: gitRootDir, remoteName: remoteName, url: url)
+    }
+
+    AsyncFunction("gitReadBlob") { (gitRootDir: String, ref: String, filepath: String, asBase64: Bool) -> String in
+      try GitHelper.gitReadBlob(gitRootDir: gitRootDir, ref: ref, filepath: filepath, asBase64: asBase64)
+    }
+
+    AsyncFunction("gitDiffTrees") { (gitRootDir: String, oldRef: String, newRef: String) -> String in
+      try GitHelper.gitDiffTrees(gitRootDir: gitRootDir, oldRef: oldRef, newRef: newRef)
+    }
+
+    AsyncFunction("gitDiscardFileChanges") { (gitRootDir: String, filepath: String) -> String in
+      try GitHelper.gitDiscardFileChanges(gitRootDir: gitRootDir, filepath: filepath)
+    }
   }
 
   // ─── Static helpers ──────────────────────────────────────────────

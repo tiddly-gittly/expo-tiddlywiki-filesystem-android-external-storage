@@ -584,6 +584,46 @@ class ExternalStorageModule : Module() {
       GitHelper.gitReset(gitRootDir, ref, mode)
     }
 
+    AsyncFunction("gitClone") { url: String, directory: String, branch: String?, depth: Int, singleBranch: Boolean, noTags: Boolean, headers: String? ->
+      GitHelper.gitClone(url, directory, branch, depth, singleBranch, noTags, headers)
+    }
+
+    AsyncFunction("gitLog") { gitRootDir: String, ref: String?, maxCount: Int ->
+      GitHelper.gitLog(gitRootDir, ref, maxCount)
+    }
+
+    AsyncFunction("gitResolveRef") { gitRootDir: String, ref: String ->
+      GitHelper.gitResolveRef(gitRootDir, ref)
+    }
+
+    AsyncFunction("gitCurrentBranch") { gitRootDir: String ->
+      GitHelper.gitCurrentBranch(gitRootDir)
+    }
+
+    AsyncFunction("gitInit") { directory: String, defaultBranch: String ->
+      GitHelper.gitInit(directory, defaultBranch)
+    }
+
+    AsyncFunction("gitSetConfig") { gitRootDir: String, section: String, subsection: String?, name: String, value: String ->
+      GitHelper.gitSetConfig(gitRootDir, section, subsection, name, value)
+    }
+
+    AsyncFunction("gitAddRemote") { gitRootDir: String, remoteName: String, url: String ->
+      GitHelper.gitAddRemote(gitRootDir, remoteName, url)
+    }
+
+    AsyncFunction("gitReadBlob") { gitRootDir: String, ref: String, filepath: String, asBase64: Boolean ->
+      GitHelper.gitReadBlob(gitRootDir, ref, filepath, asBase64)
+    }
+
+    AsyncFunction("gitDiffTrees") { gitRootDir: String, oldRef: String, newRef: String ->
+      GitHelper.gitDiffTrees(gitRootDir, oldRef, newRef)
+    }
+
+    AsyncFunction("gitDiscardFileChanges") { gitRootDir: String, filepath: String ->
+      GitHelper.gitDiscardFileChanges(gitRootDir, filepath)
+    }
+
     // ─── TiddlyWiki batch file parsing ─────────────────────────────────
 
     /**
