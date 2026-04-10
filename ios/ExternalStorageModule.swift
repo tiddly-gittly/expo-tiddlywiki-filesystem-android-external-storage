@@ -223,6 +223,26 @@ public class ExternalStorageModule: Module {
     AsyncFunction("buildGitIndex") { (gitRootDir: String) -> String in
       try GitHelper.buildGitIndex(rootDir: gitRootDir)
     }
+
+    AsyncFunction("gitPush") { (gitRootDir: String, remoteName: String, localBranch: String, remoteBranch: String, force: Bool, headers: String?) -> String in
+      try GitHelper.gitPush(gitRootDir: gitRootDir, remoteName: remoteName, localBranch: localBranch, remoteBranch: remoteBranch, force: force, headers: headers)
+    }
+
+    AsyncFunction("gitFetch") { (gitRootDir: String, remoteName: String, branch: String, headers: String?) -> String in
+      try GitHelper.gitFetch(gitRootDir: gitRootDir, remoteName: remoteName, branch: branch, headers: headers)
+    }
+
+    AsyncFunction("gitCheckoutChangedFiles") { (gitRootDir: String, oldOid: String, newOid: String) -> String in
+      try GitHelper.gitCheckoutChangedFiles(gitRootDir: gitRootDir, oldOid: oldOid, newOid: newOid)
+    }
+
+    AsyncFunction("gitAddAndCommit") { (gitRootDir: String, message: String, authorName: String, authorEmail: String) -> String in
+      try GitHelper.gitAddAndCommit(gitRootDir: gitRootDir, message: message, authorName: authorName, authorEmail: authorEmail)
+    }
+
+    AsyncFunction("gitReset") { (gitRootDir: String, ref: String, mode: String) -> String in
+      try GitHelper.gitReset(gitRootDir: gitRootDir, ref: ref, mode: mode)
+    }
   }
 
   // ─── Static helpers ──────────────────────────────────────────────

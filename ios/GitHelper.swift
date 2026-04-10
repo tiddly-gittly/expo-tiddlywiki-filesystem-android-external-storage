@@ -694,4 +694,37 @@ enum GitHelper {
     data.append(UInt8((value >> 8) & 0xFF))
     data.append(UInt8(value & 0xFF))
   }
+
+  // ─── Stubs for operations requiring libgit2 (not yet available on iOS) ───
+
+  static func gitPush(
+    gitRootDir: String, remoteName: String, localBranch: String,
+    remoteBranch: String, force: Bool, headers: String?
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git push not available on iOS (no libgit2). Use isomorphic-git fallback.\"}"
+  }
+
+  static func gitFetch(
+    gitRootDir: String, remoteName: String, branch: String, headers: String?
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git fetch not available on iOS (no libgit2). Use isomorphic-git fallback.\"}"
+  }
+
+  static func gitCheckoutChangedFiles(
+    gitRootDir: String, oldOid: String, newOid: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git checkout not available on iOS (no libgit2). Use isomorphic-git fallback.\"}"
+  }
+
+  static func gitAddAndCommit(
+    gitRootDir: String, message: String, authorName: String, authorEmail: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git commit not available on iOS (no libgit2). Use isomorphic-git fallback.\"}"
+  }
+
+  static func gitReset(
+    gitRootDir: String, ref: String, mode: String
+  ) throws -> String {
+    return "{\"ok\":false,\"error\":\"Native git reset not available on iOS (no libgit2). Use isomorphic-git fallback.\"}"
+  }
 }

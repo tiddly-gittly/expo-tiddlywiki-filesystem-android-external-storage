@@ -550,7 +550,7 @@ class ExternalStorageModule : Module() {
       mapOf("filesExtracted" to filesExtracted)
     }
 
-    // ─── Git status ──────────────────────────────────────────────────
+    // ─── Git operations (all via JGit) ─────────────────────────────────
 
     AsyncFunction("gitStatus") { gitRootDir: String ->
       GitHelper.gitStatus(gitRootDir)
@@ -574,6 +574,14 @@ class ExternalStorageModule : Module() {
 
     AsyncFunction("gitCheckoutChangedFiles") { gitRootDir: String, oldOid: String, newOid: String ->
       GitHelper.gitCheckoutChangedFiles(gitRootDir, oldOid, newOid)
+    }
+
+    AsyncFunction("gitAddAndCommit") { gitRootDir: String, message: String, authorName: String, authorEmail: String ->
+      GitHelper.gitAddAndCommit(gitRootDir, message, authorName, authorEmail)
+    }
+
+    AsyncFunction("gitReset") { gitRootDir: String, ref: String, mode: String ->
+      GitHelper.gitReset(gitRootDir, ref, mode)
     }
 
     // ─── TiddlyWiki batch file parsing ─────────────────────────────────

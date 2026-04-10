@@ -242,6 +242,29 @@ interface IExternalStorageModule {
    * @returns JSON string: `{"ok":true,"count":N,"files":[...]}` or `{"ok":false,"error":"..."}`
    */
   gitCheckoutChangedFiles(gitRootDir: string, oldOid: string, newOid: string): Promise<string>;
+
+  /**
+   * Stage all changes and commit using native git (JGit on Android).
+   * Replaces isomorphic-git's statusMatrix + add/remove loop which OOMs on large repos.
+   *
+   * @param gitRootDir   Absolute path to the git working directory
+   * @param message      Commit message
+   * @param authorName   Author name
+   * @param authorEmail  Author email
+   * @returns JSON string: `{"ok":true,"commitId":"abc123"}` or `{"ok":false,"error":"..."}`
+   */
+  gitAddAndCommit(gitRootDir: string, message: string, authorName: string, authorEmail: string): Promise<string>;
+
+  /**
+   * Reset the current branch to a specific ref using native git (JGit on Android).
+   * Supports hard, mixed, and soft reset modes.
+   *
+   * @param gitRootDir  Absolute path to the git working directory
+   * @param ref         Target ref (e.g. "origin/main", commit SHA)
+   * @param mode        Reset mode: "hard", "mixed", or "soft"
+   * @returns JSON string: `{"ok":true,"ref":"abc123"}` or `{"ok":false,"error":"..."}`
+   */
+  gitReset(gitRootDir: string, ref: string, mode: string): Promise<string>;
 }
 
 export const ExternalStorage: IExternalStorageModule = new Proxy({} as IExternalStorageModule, {
