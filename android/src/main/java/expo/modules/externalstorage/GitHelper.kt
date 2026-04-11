@@ -84,17 +84,48 @@ internal object GitHelper {
   }
 
   /**
-   * Ensure repository git config forces protocol.version=0.
+   * Ensure repository git config forces protocol.version=0 and
+   * constrains pack memory for Android's limited heap.
+   *
    * TidGi Desktop's git server uses `git --stateless-rpc` which only speaks V0/V1.
    * JGit defaults to V2 negotiation, which causes the error:
    *   "Starting read stage without written request data pending is not supported"
    * because the server doesn't handle V2 capability advertisements.
+   *
+   * Pack memory limits prevent OOM on large repos (Android heap is ~268MB).
+   * Default JGit settings: deltaCacheSize=50MB, windowMemory=unlimited,
+   * bigFileThreshold=50MB — far too much for a mobile device.
    */
   private fun ensureProtocolV0(repo: Repository) {
     val config = repo.config
+    var dirty = false
     val current = config.getString("protocol", null, "version")
     if (current != "0") {
       config.setString("protocol", null, "version", "0")
+      dirty = true
+    }
+    // Limit pack memory to avoid OOM on push
+    // pack.windowMemory: max bytes for delta search window (per thread), default unlimited
+    if (config.getLong("pack", "windowmemory", 0) == 0L) {
+      config.setLong("pack", null, "windowmemory", 10L * 1024 * 1024) // 10MB
+      dirty = true
+    }
+    // pack.deltaCacheSize: total delta cache, default 50MB
+    if (config.getLong("pack", "deltacachesize", 50L * 1024 * 1024) >= 50L * 1024 * 1024) {
+      config.setLong("pack", null, "deltacachesize", 5L * 1024 * 1024) // 5MB
+      dirty = true
+    }
+    // pack.threads: limit to 1 to reduce memory pressure
+    if (config.getInt("pack", "threads", 0) == 0) {
+      config.setInt("pack", null, "threads", 1)
+      dirty = true
+    }
+    // pack.window: reduce from 10 to 5
+    if (config.getInt("pack", "window", 10) > 5) {
+      config.setInt("pack", null, "window", 5)
+      dirty = true
+    }
+    if (dirty) {
       config.save()
     }
   }
