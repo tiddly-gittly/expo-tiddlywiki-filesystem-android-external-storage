@@ -4,25 +4,20 @@ import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.ResetCommand
 import org.eclipse.jgit.diff.DiffEntry
 import org.eclipse.jgit.diff.DiffFormatter
-import org.eclipse.jgit.internal.storage.pack.PackWriter
 import org.eclipse.jgit.lib.Constants
-import org.eclipse.jgit.lib.NullProgressMonitor
 import org.eclipse.jgit.lib.ObjectId
 import org.eclipse.jgit.lib.Repository
 import org.eclipse.jgit.revwalk.RevWalk
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder
-import org.eclipse.jgit.transport.PacketLineIn
+import org.eclipse.jgit.transport.RefSpec
 import org.eclipse.jgit.transport.TransportHttp
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
 import org.eclipse.jgit.treewalk.TreeWalk
+import org.eclipse.jgit.treewalk.filter.PathFilterGroup
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import android.util.Base64
 
 /**
@@ -49,567 +44,59 @@ internal object GitHelper {
       .build()
   }
 
-  // ─── Raw HTTP helpers for Git Smart HTTP protocol ─────────────────
-
-  /**
-   * Parse headers JSON into a map.
-   */
-  private fun parseHeaders(headers: String?): Map<String, String> {
-    if (headers == null) return emptyMap()
-    return try {
-      val obj = JSONObject(headers)
-      val map = mutableMapOf<String, String>()
-      for (key in obj.keys()) map[key] = obj.getString(key)
-      map
-    } catch (e: Exception) {
-      emptyMap()
-    }
-  }
-
-  /**
-   * Open an HTTP connection with custom headers applied.
-   */
-  private fun openHttpConnection(url: String, method: String, headers: Map<String, String>, contentType: String? = null): HttpURLConnection {
-    val conn = URL(url).openConnection() as HttpURLConnection
-    conn.requestMethod = method
-    conn.connectTimeout = 30_000
-    conn.readTimeout = 120_000
-    conn.instanceFollowRedirects = true
-    for ((k, v) in headers) conn.setRequestProperty(k, v)
-    if (contentType != null) conn.setRequestProperty("Content-Type", contentType)
-    return conn
-  }
-
-  /**
-   * Parse pkt-line formatted /info/refs response into a map of ref→oid.
-   * Also returns the set of capabilities advertised by the server.
-   */
-  private data class ServerRefs(
-    val refs: Map<String, String>,
-    val capabilities: Set<String>
-  )
-
-  private fun parseInfoRefs(input: InputStream, service: String): ServerRefs {
-    val pktIn = PacketLineIn(input)
-    val refs = mutableMapOf<String, String>()
-    val capabilities = mutableSetOf<String>()
-
-    // First: skip service announcement line(s) and flush
-    // Format: "# service=git-upload-pack\n" + "0000"
-    // The server may also send the line as a pkt-line.
-    var firstRef = true
-    while (true) {
-      val line = pktIn.readString()
-      if (PacketLineIn.isEnd(line)) break // flush packet after service announcement
-      // Some servers include "# service=..." in pkt-line format
-      if (line.startsWith("# ")) continue
-      // If we got here without a flush, it's the first ref line
-      // (shouldn't happen with standard servers)
-    }
-
-    // Now read refs
-    while (true) {
-      val line = pktIn.readString()
-      if (PacketLineIn.isEnd(line)) break
-      if (line.isEmpty()) continue
-
-      val parts = line.split(" ", limit = 2)
-      if (parts.size < 2) continue
-      val oid = parts[0]
-      val refWithCaps = parts[1]
-
-      if (firstRef && refWithCaps.contains('\u0000')) {
-        // First ref line contains capabilities after NUL
-        val refParts = refWithCaps.split('\u0000', limit = 2)
-        refs[refParts[0]] = oid
-        if (refParts.size > 1) {
-          capabilities.addAll(refParts[1].trim().split(" "))
-        }
-        firstRef = false
-      } else {
-        refs[refWithCaps.trim()] = oid
-        firstRef = false
-      }
-    }
-
-    return ServerRefs(refs, capabilities)
-  }
-
-  // ─── Git push via raw HTTP ──────────────────────────────────────
-
-  /**
-   * Push local branch to remote using raw Git Smart HTTP protocol.
-   *
-   * This bypasses JGit's TransportHttp (which has issues with some servers)
-   * and directly implements the stateless-rpc push protocol:
-   *
-   * 1. GET /info/refs?service=git-receive-pack → parse server refs + capabilities
-   * 2. Build pack data containing objects the server is missing
-   * 3. POST /git-receive-pack with ref-update command + pack data
-   * 4. Parse server response for success/failure
-   */
-  fun gitPush(
-    gitRootDir: String,
-    remoteName: String,
-    localBranch: String,
-    remoteBranch: String,
-    force: Boolean,
+  /** Apply custom HTTP headers and credentials to a JGit transport command. */
+  private fun applyHeaders(
+    command: org.eclipse.jgit.api.TransportCommand<*, *>,
     headers: String?
-  ): String {
-    val result = JSONObject()
-    try {
-      val repo = openRepo(gitRootDir)
+  ) {
+    // Parse custom headers JSON
+    val headerMap = mutableMapOf<String, String>()
+    if (headers != null) {
       try {
-        val headerMap = parseHeaders(headers)
-        val remoteUrl = repo.config.getString("remote", remoteName, "url")
-          ?: throw Exception("Remote '$remoteName' not configured")
-
-        // Resolve local branch to its SHA
-        val localRef = repo.resolve("refs/heads/$localBranch")
-          ?: throw Exception("Cannot resolve local branch: $localBranch")
-
-        // Step 1: GET /info/refs?service=git-receive-pack
-        val infoUrl = "$remoteUrl/info/refs?service=git-receive-pack"
-        val infoConn = openHttpConnection(infoUrl, "GET", headerMap)
-        infoConn.setRequestProperty("Accept", "application/x-git-receive-pack-advertisement, */*")
-        val serverRefs: ServerRefs
-        try {
-          if (infoConn.responseCode != 200) {
-            throw Exception("info/refs failed: ${infoConn.responseCode} ${infoConn.responseMessage}")
-          }
-          serverRefs = parseInfoRefs(infoConn.inputStream, "git-receive-pack")
-        } finally {
-          infoConn.disconnect()
+        val headerObj = JSONObject(headers)
+        for (key in headerObj.keys()) {
+          headerMap[key] = headerObj.getString(key)
         }
-
-        // Check if push is needed
-        val remoteOid = serverRefs.refs[remoteBranch] ?: ObjectId.zeroId().name
-        if (remoteOid == localRef.name) {
-          result.put("ok", true)
-          result.put("updates", JSONArray().put(JSONObject().apply {
-            put("remoteName", remoteBranch)
-            put("status", "UP_TO_DATE")
-            put("message", "")
-          }))
-          return result.toString()
-        }
-
-        // Step 2: Build the pack data
-        val packBuf = ByteArrayOutputStream()
-
-        // Write the ref-update command line in pkt-line format
-        // Format: <old-oid> <new-oid> <ref-name>\0<capabilities>\n
-        val caps = mutableListOf("report-status", "side-band-64k")
-        if (serverRefs.capabilities.contains("ofs-delta")) caps.add("ofs-delta")
-        val commandLine = "$remoteOid ${localRef.name} $remoteBranch\u0000${caps.joinToString(" ")}\n"
-        writePktLine(packBuf, commandLine)
-        // Flush packet (0000)
-        packBuf.write("0000".toByteArray())
-
-        // Build pack with objects missing on server
-        val remoteObjectId = if (remoteOid == ObjectId.zeroId().name) null else ObjectId.fromString(remoteOid)
-        val localObjectId = localRef
-
-        val packData = ByteArrayOutputStream()
-        val writer = PackWriter(repo)
-        try {
-          writer.setUseBitmaps(true)
-          writer.setThin(true)
-          writer.setDeltaBaseAsOffset(serverRefs.capabilities.contains("ofs-delta"))
-
-          // Determine which objects to send
-          val want = setOf(localObjectId)
-          val have = if (remoteObjectId != null) setOf(remoteObjectId) else emptySet<ObjectId>()
-          writer.preparePack(NullProgressMonitor.INSTANCE, want, have)
-          writer.writePack(NullProgressMonitor.INSTANCE, NullProgressMonitor.INSTANCE, packData)
-        } finally {
-          writer.close()
-        }
-
-        packBuf.write(packData.toByteArray())
-
-        // Step 3: POST /git-receive-pack
-        val postUrl = "$remoteUrl/git-receive-pack"
-        val postConn = openHttpConnection(postUrl, "POST", headerMap, "application/x-git-receive-pack-request")
-        postConn.setRequestProperty("Accept", "application/x-git-receive-pack-result")
-        postConn.doOutput = true
-        val requestBody = packBuf.toByteArray()
-        postConn.setFixedLengthStreamingMode(requestBody.size)
-
-        try {
-          postConn.outputStream.use { it.write(requestBody) }
-
-          if (postConn.responseCode != 200) {
-            throw Exception("git-receive-pack failed: ${postConn.responseCode} ${postConn.responseMessage}")
-          }
-
-          // Step 4: Parse response
-          val responseBytes = postConn.inputStream.readBytes()
-          val responseStr = tryParseReceivePackResponse(responseBytes)
-
-          val updatesArray = JSONArray()
-          val updateObj = JSONObject()
-          updateObj.put("remoteName", remoteBranch)
-          updateObj.put("status", if (responseStr.contains("unpack ok")) "OK" else "REJECTED")
-          updateObj.put("message", responseStr)
-          updatesArray.put(updateObj)
-
-          if (!responseStr.contains("unpack ok")) {
-            throw Exception("Push rejected by server: $responseStr")
-          }
-
-          result.put("ok", true)
-          result.put("updates", updatesArray)
-          android.util.Log.i("GitPush", "Raw HTTP push completed: ${localRef.name.take(8)} → $remoteBranch")
-        } finally {
-          postConn.disconnect()
-        }
-      } finally {
-        repo.close()
+      } catch (e: Exception) {
+        android.util.Log.w("GitHelper", "Failed to parse headers: ${e.message}")
       }
-    } catch (e: Exception) {
-      result.put("ok", false)
-      result.put("error", e.message ?: "Unknown push error")
-      android.util.Log.e("GitPush", "Push failed: ${e.message}", e)
     }
-    return result.toString()
-  }
 
-  private fun writePktLine(out: ByteArrayOutputStream, data: String) {
-    val bytes = data.toByteArray()
-    val length = bytes.size + 4
-    val hex = String.format("%04x", length)
-    out.write(hex.toByteArray())
-    out.write(bytes)
-  }
-
-  /**
-   * Try to parse receive-pack response, handling side-band encoding.
-   */
-  private fun tryParseReceivePackResponse(responseBytes: ByteArray): String {
-    // The response may be plain pkt-line or side-band encoded.
-    // Try to extract meaningful text.
-    val text = StringBuilder()
-    try {
-      val pktIn = PacketLineIn(ByteArrayInputStream(responseBytes))
-      while (true) {
-        val line = pktIn.readString()
-        if (PacketLineIn.isEnd(line)) break
-        text.append(line).append("\n")
-      }
-    } catch (e: Exception) {
-      // Fallback: just decode as UTF-8
-      text.append(String(responseBytes, Charsets.UTF_8))
-    }
-    return text.toString().trim()
-  }
-
-  // ─── Git fetch via raw HTTP ─────────────────────────────────────
-
-  /**
-   * Fetch from remote using raw Git Smart HTTP protocol.
-   *
-   * This bypasses JGit's TransportHttp and directly implements:
-   *
-   * 1. GET /info/refs?service=git-upload-pack → parse server refs
-   * 2. Build wants/haves negotiation message
-   * 3. POST /git-upload-pack with wants/haves + done → receive pack data
-   * 4. Parse and apply pack to local repo, update tracking refs
-   */
-  fun gitFetch(
-    gitRootDir: String,
-    remoteName: String,
-    branch: String,
-    headers: String?
-  ): String {
-    val result = JSONObject()
-    try {
-      val repo = openRepo(gitRootDir)
+    // Extract Basic Auth from Authorization header and set as CredentialsProvider.
+    val authHeader = headerMap["Authorization"] ?: headerMap["authorization"]
+    if (authHeader != null && authHeader.startsWith("Basic ", ignoreCase = true)) {
       try {
-        val headerMap = parseHeaders(headers)
-        val remoteUrl = repo.config.getString("remote", remoteName, "url")
-          ?: throw Exception("Remote '$remoteName' not configured")
-
-        // Step 1: GET /info/refs?service=git-upload-pack
-        val infoUrl = "$remoteUrl/info/refs?service=git-upload-pack"
-        val infoConn = openHttpConnection(infoUrl, "GET", headerMap)
-        infoConn.setRequestProperty("Accept", "application/x-git-upload-pack-advertisement, */*")
-        val serverRefs: ServerRefs
-        try {
-          if (infoConn.responseCode != 200) {
-            throw Exception("info/refs failed: ${infoConn.responseCode} ${infoConn.responseMessage}")
-          }
-          serverRefs = parseInfoRefs(infoConn.inputStream, "git-upload-pack")
-        } finally {
-          infoConn.disconnect()
-        }
-
-        // Find the ref we want
-        val remoteRef = "refs/heads/$branch"
-        val wantOid = serverRefs.refs[remoteRef]
-        if (wantOid == null) {
-          // Branch doesn't exist on remote — nothing to fetch
-          result.put("ok", true)
-          result.put("updates", JSONArray())
-          return result.toString()
-        }
-
-        // Check if we already have this object
-        val wantObjectId = ObjectId.fromString(wantOid)
-        val trackingRef = "refs/remotes/$remoteName/$branch"
-        val localTrackingOid = repo.resolve(trackingRef)
-
-        if (localTrackingOid != null && localTrackingOid == wantObjectId) {
-          // Already up to date
-          result.put("ok", true)
-          result.put("updates", JSONArray())
-          return result.toString()
-        }
-
-        // Also check if we already have the object in our object database
-        if (repo.objectDatabase.has(wantObjectId)) {
-          // We have the object, just update the tracking ref
-          updateRef(repo, trackingRef, wantObjectId)
-          val updatesArray = JSONArray()
-          updatesArray.put(JSONObject().apply {
-            put("ref", trackingRef)
-            put("oldObjectId", localTrackingOid?.name ?: ObjectId.zeroId().name)
-            put("newObjectId", wantOid)
-          })
-          result.put("ok", true)
-          result.put("updates", updatesArray)
-          return result.toString()
-        }
-
-        // Step 2: Build the upload-pack request
-        val requestBuf = ByteArrayOutputStream()
-
-        // Write "want" lines
-        // First want line includes capabilities
-        val caps = mutableListOf("no-progress", "report-status", "side-band-64k")
-        if (serverRefs.capabilities.contains("ofs-delta")) caps.add("ofs-delta")
-        if (serverRefs.capabilities.contains("thin-pack")) caps.add("thin-pack")
-        writePktLine(requestBuf, "want $wantOid ${caps.joinToString(" ")}\n")
-
-        // Additional wants: also fetch any other refs we might need
-        // (for now, just the one branch)
-        // Flush after wants
-        requestBuf.write("0000".toByteArray())
-
-        // Write "have" lines — tell server what we already have
-        // Send recent commits so server can compute a thin pack
-        val haveOids = collectHaveOids(repo, 256)
-        for (have in haveOids) {
-          writePktLine(requestBuf, "have ${have.name}\n")
-        }
-
-        // "done" — single-round stateless negotiation
-        writePktLine(requestBuf, "done\n")
-        // Flush
-        requestBuf.write("0000".toByteArray())
-
-        // Step 3: POST /git-upload-pack
-        val postUrl = "$remoteUrl/git-upload-pack"
-        val postConn = openHttpConnection(postUrl, "POST", headerMap, "application/x-git-upload-pack-request")
-        postConn.setRequestProperty("Accept", "application/x-git-upload-pack-result")
-        postConn.doOutput = true
-        val requestBody = requestBuf.toByteArray()
-        postConn.setFixedLengthStreamingMode(requestBody.size)
-
-        try {
-          postConn.outputStream.use { it.write(requestBody) }
-
-          if (postConn.responseCode != 200) {
-            throw Exception("git-upload-pack failed: ${postConn.responseCode} ${postConn.responseMessage}")
-          }
-
-          // Step 4: Parse response and apply pack
-          val responseStream = postConn.inputStream
-          val responseBytes = responseStream.readBytes()
-
-          // The response is pkt-line encoded. It starts with NAK or ACK lines,
-          // then contains pack data (possibly side-band encoded).
-          val packData = extractPackData(responseBytes)
-
-          if (packData != null && packData.isNotEmpty()) {
-            // Parse and index the pack
-            val inserter = repo.newObjectInserter()
-            try {
-              val parser = inserter.newPackParser(ByteArrayInputStream(packData))
-              parser.setAllowThin(true)
-              parser.parse(NullProgressMonitor.INSTANCE)
-              inserter.flush()
-            } finally {
-              inserter.close()
-            }
-          }
-
-          // Update tracking ref
-          updateRef(repo, trackingRef, wantObjectId)
-
-          val updatesArray = JSONArray()
-          updatesArray.put(JSONObject().apply {
-            put("ref", trackingRef)
-            put("oldObjectId", localTrackingOid?.name ?: ObjectId.zeroId().name)
-            put("newObjectId", wantOid)
-          })
-
-          result.put("ok", true)
-          result.put("updates", updatesArray)
-          android.util.Log.i("GitFetch", "Raw HTTP fetch completed: $wantOid → $trackingRef")
-        } finally {
-          postConn.disconnect()
-        }
-      } finally {
-        repo.close()
+        val decoded = String(Base64.decode(authHeader.substring(6), Base64.DEFAULT))
+        val colonIndex = decoded.indexOf(':')
+        val username = if (colonIndex >= 0) decoded.substring(0, colonIndex) else ""
+        val password = if (colonIndex >= 0) decoded.substring(colonIndex + 1) else decoded
+        command.setCredentialsProvider(UsernamePasswordCredentialsProvider(username, password))
+      } catch (e: Exception) {
+        android.util.Log.w("GitHelper", "Failed to decode Basic auth: ${e.message}")
       }
-    } catch (e: Exception) {
-      result.put("ok", false)
-      result.put("error", e.message ?: "Unknown fetch error")
-      android.util.Log.e("GitFetch", "Fetch failed: ${e.message}", e)
     }
-    return result.toString()
+
+    command.setTransportConfigCallback { transport ->
+      if (transport is TransportHttp) {
+        transport.setAdditionalHeaders(headerMap)
+      }
+    }
   }
 
   /**
-   * Collect recent commit OIDs that we can tell the server we "have".
-   * This helps the server send a minimal pack.
+   * Ensure repository git config forces protocol.version=0.
+   * TidGi Desktop's git server uses `git --stateless-rpc` which only speaks V0/V1.
+   * JGit defaults to V2 negotiation, which causes the error:
+   *   "Starting read stage without written request data pending is not supported"
+   * because the server doesn't handle V2 capability advertisements.
    */
-  private fun collectHaveOids(repo: Repository, maxCount: Int): List<ObjectId> {
-    val oids = mutableListOf<ObjectId>()
-    try {
-      val walk = RevWalk(repo)
-      // Add all refs as starting points
-      for (ref in repo.refDatabase.refs) {
-        try {
-          val peeled = repo.refDatabase.peel(ref)
-          val target = peeled.peeledObjectId ?: peeled.objectId ?: continue
-          walk.markStart(walk.parseCommit(target))
-        } catch (e: Exception) {
-          // Skip non-commit refs
-        }
-      }
-      var count = 0
-      for (commit in walk) {
-        oids.add(commit.id)
-        if (++count >= maxCount) break
-      }
-      walk.close()
-    } catch (e: Exception) {
-      android.util.Log.w("GitFetch", "collectHaveOids error: ${e.message}")
+  private fun ensureProtocolV0(repo: Repository) {
+    val config = repo.config
+    val current = config.getString("protocol", null, "version")
+    if (current != "0") {
+      config.setString("protocol", null, "version", "0")
+      config.save()
     }
-    return oids
-  }
-
-  /**
-   * Update a ref to point to a new object ID.
-   */
-  private fun updateRef(repo: Repository, refName: String, newId: ObjectId) {
-    val refUpdate = repo.updateRef(refName)
-    refUpdate.setNewObjectId(newId)
-    refUpdate.isForceUpdate = true
-    val updateResult = refUpdate.update()
-    android.util.Log.i("GitFetch", "Updated ref $refName → ${newId.name.take(8)}: $updateResult")
-  }
-
-  /**
-   * Extract pack data from a git-upload-pack response.
-   *
-   * The response format is:
-   * - pkt-line with "NAK\n" or "ACK <oid>\n" lines
-   * - Then pack data, possibly side-band encoded
-   *
-   * Side-band encoding: each pkt-line starts with a channel byte:
-   * - 1 = pack data
-   * - 2 = progress messages  
-   * - 3 = error messages
-   *
-   * We need to handle both side-band and non-side-band responses.
-   */
-  private fun extractPackData(responseBytes: ByteArray): ByteArray? {
-    if (responseBytes.isEmpty()) return null
-
-    val packBytes = ByteArrayOutputStream()
-    val input = ByteArrayInputStream(responseBytes)
-
-    try {
-      // Read pkt-lines
-      while (input.available() > 0) {
-        // Read 4-byte hex length
-        val hexBytes = ByteArray(4)
-        val read = input.read(hexBytes)
-        if (read < 4) break
-
-        val hexStr = String(hexBytes)
-        if (hexStr == "0000") continue // flush packet
-        if (hexStr == "0001") continue // delimiter packet
-        if (hexStr == "0002") continue // response-end packet
-
-        val length = try { hexStr.toInt(16) } catch (e: Exception) {
-          // Not a valid pkt-line, might be raw pack data
-          // Check if the first 4 bytes are "PACK" signature
-          if (hexStr == "PACK") {
-            packBytes.write(hexBytes)
-            val remaining = ByteArray(input.available())
-            input.read(remaining)
-            packBytes.write(remaining)
-            break
-          }
-          break
-        }
-
-        if (length <= 4) continue // empty line
-
-        val dataLen = length - 4
-        val data = ByteArray(dataLen)
-        var totalRead = 0
-        while (totalRead < dataLen) {
-          val n = input.read(data, totalRead, dataLen - totalRead)
-          if (n < 0) break
-          totalRead += n
-        }
-
-        // Check the content
-        val text = String(data, Charsets.UTF_8).trim()
-        if (text == "NAK" || text.startsWith("ACK ")) continue
-
-        // Check for side-band encoding
-        if (data.isNotEmpty()) {
-          val channel = data[0].toInt()
-          when (channel) {
-            1 -> {
-              // Pack data
-              packBytes.write(data, 1, data.size - 1)
-            }
-            2 -> {
-              // Progress - log and skip
-              android.util.Log.d("GitFetch", "progress: ${String(data, 1, data.size - 1).trim()}")
-            }
-            3 -> {
-              // Error
-              val errorMsg = String(data, 1, data.size - 1).trim()
-              android.util.Log.e("GitFetch", "server error: $errorMsg")
-              throw Exception("Server error during fetch: $errorMsg")
-            }
-            else -> {
-              // No side-band: check if this is raw pack data
-              if (data.size >= 4 && data[0] == 'P'.code.toByte() && data[1] == 'A'.code.toByte()
-                && data[2] == 'C'.code.toByte() && data[3] == 'K'.code.toByte()) {
-                packBytes.write(data)
-              } else {
-                // Unknown data — might be text response, skip
-                android.util.Log.d("GitFetch", "Unknown pkt-line: ${text.take(100)}")
-              }
-            }
-          }
-        }
-      }
-    } catch (e: Exception) {
-      android.util.Log.w("GitFetch", "extractPackData: ${e.message}")
-    }
-
-    val result = packBytes.toByteArray()
-    return if (result.isEmpty()) null else result
   }
 
   // ─── Git status (JGit) ──────────────────────────────────────────
@@ -796,11 +283,108 @@ internal object GitHelper {
     return result.toString()
   }
 
-  // ─── Git push (raw HTTP - see above) ──────────────────────────────
-  // gitPush() is defined earlier in this file using raw HTTP transport.
+  // ─── Git push (JGit) ────────────────────────────────────────────
 
-  // ─── Git fetch (raw HTTP - see above) ───────────────────────────
-  // gitFetch() is defined earlier in this file using raw HTTP transport.
+  /**
+   * Push local branch to remote using JGit (efficient native pack building).
+   * JGit handles pack construction in Java with bounded memory usage,
+   * avoiding the OOM that isomorphic-git causes on large repos.
+   */
+  fun gitPush(
+    gitRootDir: String,
+    remoteName: String,
+    localBranch: String,
+    remoteBranch: String,
+    force: Boolean,
+    headers: String?
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        ensureProtocolV0(repo)
+        val git = Git(repo)
+        val pushCommand = git.push()
+          .setRemote(remoteName)
+          .setRefSpecs(RefSpec("refs/heads/$localBranch:$remoteBranch"))
+          .setForce(force)
+
+        applyHeaders(pushCommand, headers)
+
+        val pushResults = pushCommand.call()
+
+        val resultsArray = JSONArray()
+        for (pushResult in pushResults) {
+          for (update in pushResult.remoteUpdates) {
+            val updateObj = JSONObject()
+            updateObj.put("remoteName", update.remoteName)
+            updateObj.put("status", update.status.name)
+            updateObj.put("message", update.message ?: "")
+            resultsArray.put(updateObj)
+          }
+        }
+
+        result.put("ok", true)
+        result.put("updates", resultsArray)
+        android.util.Log.i("GitPush", "Push completed: ${resultsArray.length()} updates")
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown push error")
+      android.util.Log.e("GitPush", "Push failed: ${e.message}", e)
+    }
+    return result.toString()
+  }
+
+  // ─── Git fetch (JGit) ───────────────────────────────────────────
+
+  /**
+   * Fetch from remote using JGit (efficient native pack handling).
+   */
+  fun gitFetch(
+    gitRootDir: String,
+    remoteName: String,
+    branch: String,
+    headers: String?
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        ensureProtocolV0(repo)
+        val git = Git(repo)
+        val fetchCommand = git.fetch()
+          .setRemote(remoteName)
+          .setRefSpecs(RefSpec("+refs/heads/$branch:refs/remotes/$remoteName/$branch"))
+
+        applyHeaders(fetchCommand, headers)
+
+        val fetchResult = fetchCommand.call()
+
+        val updatesArray = JSONArray()
+        for (update in fetchResult.trackingRefUpdates) {
+          val updateObj = JSONObject()
+          updateObj.put("ref", update.localName)
+          updateObj.put("oldObjectId", update.oldObjectId?.name ?: "")
+          updateObj.put("newObjectId", update.newObjectId?.name ?: "")
+          updatesArray.put(updateObj)
+        }
+
+        result.put("ok", true)
+        result.put("updates", updatesArray)
+        android.util.Log.i("GitFetch", "Fetch completed: ${updatesArray.length()} updates")
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown fetch error")
+      android.util.Log.e("GitFetch", "Fetch failed: ${e.message}", e)
+    }
+    return result.toString()
+  }
 
   // ─── Git checkout changed files (JGit) ──────────────────────────
 
@@ -1038,36 +622,7 @@ internal object GitHelper {
         cloneCommand.setNoTags()
       }
 
-      // Apply headers for clone (JGit transport is used here since clone
-      // is typically done via archive download; this is just a fallback)
-      if (headers != null) {
-        try {
-          val headerObj = JSONObject(headers)
-          val headerMap = mutableMapOf<String, String>()
-          for (key in headerObj.keys()) headerMap[key] = headerObj.getString(key)
-
-          val authHeader = headerMap["Authorization"] ?: headerMap["authorization"]
-          if (authHeader != null && authHeader.startsWith("Basic ", ignoreCase = true)) {
-            try {
-              val decoded = String(Base64.decode(authHeader.substring(6), Base64.DEFAULT))
-              val colonIndex = decoded.indexOf(':')
-              val username = if (colonIndex >= 0) decoded.substring(0, colonIndex) else ""
-              val password = if (colonIndex >= 0) decoded.substring(colonIndex + 1) else decoded
-              cloneCommand.setCredentialsProvider(UsernamePasswordCredentialsProvider(username, password))
-            } catch (e: Exception) {
-              android.util.Log.w("GitHelper", "Failed to decode Basic auth: ${e.message}")
-            }
-          }
-
-          cloneCommand.setTransportConfigCallback { transport ->
-            if (transport is TransportHttp) {
-              transport.setAdditionalHeaders(headerMap)
-            }
-          }
-        } catch (e: Exception) {
-          android.util.Log.w("GitHelper", "Failed to parse clone headers: ${e.message}")
-        }
-      }
+      applyHeaders(cloneCommand, headers)
 
       val git = cloneCommand.call()
       val headId = git.repository.resolve(Constants.HEAD)
