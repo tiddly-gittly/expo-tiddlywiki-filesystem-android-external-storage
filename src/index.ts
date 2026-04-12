@@ -222,6 +222,19 @@ interface IExternalStorageModule {
   gitPush(gitRootDir: string, remoteName: string, localBranch: string, remoteBranch: string, force: boolean, headers?: string | null): Promise<string>;
 
   /**
+   * Create a git bundle containing unpushed commits (local branch tip minus remote tracking branch).
+   * Returns base64-encoded bundle data that can be HTTP-POSTed to the desktop for unbundling.
+   * This avoids JGit's broken HTTP push (SmartHttpPushConnection) entirely.
+   *
+   * @param gitRootDir    Absolute path to the git working directory
+   * @param remoteName    Remote name (e.g. "origin")
+   * @param localBranch   Local branch name (e.g. "master")
+   * @param remoteBranch  Remote branch name (e.g. "master")
+   * @returns JSON string: `{"ok":true,"bundleBase64":"..."}` or `{"ok":false,"error":"..."}`
+   */
+  gitCreateBundle(gitRootDir: string, remoteName: string, localBranch: string, remoteBranch: string): Promise<string>;
+
+  /**
    * Fetch from remote using native JGit (efficient pack handling).
    *
    * @param gitRootDir  Absolute path to the git working directory
