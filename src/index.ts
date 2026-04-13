@@ -235,6 +235,19 @@ interface IExternalStorageModule {
   gitCreateBundle(gitRootDir: string, remoteName: string, localBranch: string, remoteBranch: string): Promise<string>;
 
   /**
+   * Fetch commits from a local git bundle file into origin/<branch>.
+   * Avoids JGit's broken HTTP multi-request transport.
+   * The bundle file is expected at `<gitRootDir>/.git/<bundleFileName>`.
+   * After fetching, the bundle file is deleted.
+   *
+   * @param gitRootDir     Absolute path to the git working directory
+   * @param bundleFileName Name of the bundle file inside .git/ (e.g. "incoming.bundle")
+   * @param branch         Branch name (e.g. "master")
+   * @returns JSON string: `{"ok":true,"updates":[...]}` or `{"ok":false,"error":"..."}`
+   */
+  gitFetchFromBundle(gitRootDir: string, bundleFileName: string, branch: string): Promise<string>;
+
+  /**
    * Fetch from remote using native JGit (efficient pack handling).
    *
    * @param gitRootDir  Absolute path to the git working directory

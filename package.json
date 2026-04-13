@@ -1,6 +1,6 @@
 {
   "name": "expo-tiddlywiki-filesystem-android-external-storage",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "description": "Expo native module for TidGi-Mobile: filesystem I/O + TiddlyWiki .tid/.meta/.json batch parsing + git status in Kotlin (Android) and Swift (iOS)",
   "main": "build/index.js",
   "types": "build/index.d.ts",

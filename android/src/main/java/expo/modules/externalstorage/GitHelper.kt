@@ -491,6 +491,69 @@ internal object GitHelper {
     return result.toString()
   }
 
+  // ─── Git fetch from local bundle file (JGit) ───────────────────
+
+  /**
+   * Fetch commits from a local git bundle file into origin/<branch>.
+   * This avoids JGit's broken HTTP multi-request transport.
+   *
+   * The bundle file is expected to be at `<gitRootDir>/.git/<bundleFileName>`.
+   * After fetching, the bundle file is deleted.
+   *
+   * @param gitRootDir  path to the git working tree
+   * @param bundleFileName  name of the bundle file inside .git/
+   * @param branch  local branch name (e.g. "master")
+   * @return JSON: {"ok":true,"updates":[...]} or {"ok":false,"error":"..."}
+   */
+  fun gitFetchFromBundle(
+    gitRootDir: String,
+    bundleFileName: String,
+    branch: String
+  ): String {
+    val result = JSONObject()
+    try {
+      val repo = openRepo(gitRootDir)
+      try {
+        ensureProtocolV0(repo)
+        val bundlePath = java.io.File(repo.directory, bundleFileName)
+        if (!bundlePath.exists()) {
+          throw Exception("Bundle file not found: ${bundlePath.absolutePath}")
+        }
+
+        val git = Git(repo)
+        // JGit's FetchCommand supports local file URIs including bundle files
+        val fetchCommand = git.fetch()
+          .setRemote(bundlePath.absolutePath)
+          .setRefSpecs(RefSpec("+refs/heads/$branch:refs/remotes/origin/$branch"))
+
+        val fetchResult = fetchCommand.call()
+
+        val updatesArray = JSONArray()
+        for (update in fetchResult.trackingRefUpdates) {
+          val updateObj = JSONObject()
+          updateObj.put("ref", update.localName)
+          updateObj.put("oldObjectId", update.oldObjectId?.name ?: "")
+          updateObj.put("newObjectId", update.newObjectId?.name ?: "")
+          updatesArray.put(updateObj)
+        }
+
+        result.put("ok", true)
+        result.put("updates", updatesArray)
+        android.util.Log.i("GitFetchBundle", "Bundle fetch completed: ${updatesArray.length()} updates")
+
+        // Clean up bundle file
+        try { bundlePath.delete() } catch (_: Exception) { /* ignore */ }
+      } finally {
+        repo.close()
+      }
+    } catch (e: Exception) {
+      result.put("ok", false)
+      result.put("error", e.message ?: "Unknown bundle fetch error")
+      android.util.Log.e("GitFetchBundle", "Bundle fetch failed: ${e.message}", e)
+    }
+    return result.toString()
+  }
+
   // ─── Git checkout changed files (JGit) ──────────────────────────
 
   /**

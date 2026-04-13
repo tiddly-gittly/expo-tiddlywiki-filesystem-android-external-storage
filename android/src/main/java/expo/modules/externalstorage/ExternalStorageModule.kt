@@ -572,6 +572,10 @@ class ExternalStorageModule : Module() {
       GitHelper.gitCreateBundle(gitRootDir, remoteName, localBranch, remoteBranch)
     }
 
+    AsyncFunction("gitFetchFromBundle") { gitRootDir: String, bundleFileName: String, branch: String ->
+      GitHelper.gitFetchFromBundle(gitRootDir, bundleFileName, branch)
+    }
+
     AsyncFunction("gitFetch") { gitRootDir: String, remoteName: String, branch: String, headers: String? ->
       GitHelper.gitFetch(gitRootDir, remoteName, branch, headers)
     }
