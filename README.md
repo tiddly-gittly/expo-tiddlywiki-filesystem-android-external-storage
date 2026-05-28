@@ -118,6 +118,16 @@ Deletes a directory recursively.
 ### `isExternalStorageManager(): Promise<boolean>`
 Checks if the `MANAGE_EXTERNAL_STORAGE` permission is granted (Android 11+).
 
+## JGit Version Note
+
+This module bundles **JGit 6.2.x** (not the latest 6.10.x) for Android compatibility.
+
+Newer JGit versions (6.3+) call Java 9+ APIs (`InputStream.readNBytes`, `InputStream.transferTo`) that are **not available** on Android runtimes below API 31+ without full desugaring. Even with `coreLibraryDesugaringEnabled`, some of these methods may still fail at runtime on certain devices (observed on Android 12 / API 31).
+
+JGit 6.2.x is the latest release that avoids these Java 9+ API calls while still providing all the Git primitives needed by this module (clone, fetch, push, status, diff, log, etc.). One API trade-off: `CloneCommand.setDepth()` (shallow clone) was introduced in JGit 6.3, so this module does not support `--depth` on clone.
+
+If you need a newer JGit, ensure your app's `minSdkVersion` and desugaring configuration are verified on all target devices.
+
 ## License
 
 MIT
