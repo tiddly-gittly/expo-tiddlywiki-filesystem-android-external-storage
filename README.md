@@ -122,7 +122,7 @@ Checks if the `MANAGE_EXTERNAL_STORAGE` permission is granted (Android 11+).
 
 This module bundles **JGit 6.2.x** (not the latest 6.10.x) for Android compatibility.
 
-Newer JGit versions (6.3+) call Java 9+ APIs (`InputStream.readNBytes`, `InputStream.transferTo`) that are **not available** on Android runtimes below API 31+ without full desugaring. Even with `coreLibraryDesugaringEnabled`, some of these methods may still fail at runtime on certain devices (observed on Android 12 / API 31).
+Newer JGit versions (6.3+) call Java 9+ APIs (`InputStream.readNBytes`, `InputStream.transferTo`) that are **not available on Android at any API level** — Android's `desugar_jdk_libs` only backfills Java 8 language APIs, not these Java 9 I/O methods. This has been confirmed on Android 12 (API 31) and is expected to affect all current Android versions.
 
 JGit 6.2.x is the latest release that avoids these Java 9+ API calls while still providing all the Git primitives needed by this module (clone, fetch, push, status, diff, log, etc.). One API trade-off: `CloneCommand.setDepth()` (shallow clone) was introduced in JGit 6.3, so this module does not support `--depth` on clone.
 
