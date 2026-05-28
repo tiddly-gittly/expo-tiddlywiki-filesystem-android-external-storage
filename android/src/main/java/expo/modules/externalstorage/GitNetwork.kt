@@ -133,10 +133,6 @@ internal object GitNetwork {
         cloneCommand.setBranchesToClone(listOf("refs/heads/$branch"))
       }
 
-      if (depth > 0) {
-        cloneCommand.setDepth(depth)
-      }
-
       if (noTags) {
         cloneCommand.setNoTags()
       }
