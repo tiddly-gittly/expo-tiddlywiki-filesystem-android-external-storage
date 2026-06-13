@@ -1,6 +1,6 @@
 {
   "name": "expo-tiddlywiki-filesystem-android-external-storage",
-  "version": "2.12.0",
+  "version": "2.12.1",
   "description": "Expo native module for TidGi-Mobile: filesystem I/O + TiddlyWiki .tid/.meta/.json batch parsing + git status in Kotlin (Android) and Swift (iOS)",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "expo-module clean",
     "lint": "expo-module lint",
-    "test": "expo-module test",
+    "test": "jest --config jest.config.js",
     "prepack": "tsc -p tsconfig.json"
   },
   "keywords": [
@@ -27,13 +27,16 @@
     "react-native": "*"
   },
   "devDependencies": {
+    "@types/jest": "29.5.14",
     "@types/react": "^18.2.0",
     "@types/react-native": "^0.73.0",
     "expo": "^50.0.0",
     "expo-module-scripts": "^3.0.0",
     "expo-modules-core": "^1.11.0",
+    "jest": "29.7.0",
     "react": "^18.2.0",
     "react-native": "^0.73.0",
+    "ts-jest": "~29.0.5",
     "typescript": "^5.0.0"
   },
   "files": [
