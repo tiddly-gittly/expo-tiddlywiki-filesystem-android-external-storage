@@ -15,9 +15,17 @@ internal object TiddlyWikiParser {
    * Returns a JSON array string ready for injection into TiddlyWiki boot store.
    */
   fun batchParseTidFiles(filePaths: List<String>, quickLoadMode: Boolean): String {
-    val results = filePaths.parallelStream().map { path ->
+    // Use sequential stream (not parallelStream) to preserve input order.
+    // The JS side relies on result ordering to map titles back to file paths
+    // when building the tiddler index.
+    val results = filePaths.stream().map { path ->
       try {
-        parseTiddlerFile(path, quickLoadMode)
+        val parsed = parseTiddlerFile(path, quickLoadMode)
+        // Tag result with filepath so JS side can map correctly regardless of order
+        when (parsed) {
+          is JSONObject -> parsed.put("_filepath", path)
+        }
+        parsed
       } catch (e: Exception) {
         null
       }
