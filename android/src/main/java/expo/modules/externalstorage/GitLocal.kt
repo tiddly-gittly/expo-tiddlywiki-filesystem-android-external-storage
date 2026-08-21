@@ -8,8 +8,65 @@ import org.eclipse.jgit.treewalk.TreeWalk
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 
 internal object GitLocal {
+
+  private const val EXTERNAL_STALE_INDEX_LOCK_MS = 2 * 60 * 1000L
+
+  private fun describeFailure(error: Throwable): String {
+    val causes = mutableListOf<String>()
+    var current: Throwable? = error
+    while (current != null && causes.size < 8) {
+      val cause = current
+      val description = buildString {
+        append(cause.javaClass.simpleName)
+        if (!cause.message.isNullOrBlank()) {
+          append(": ")
+          append(cause.message)
+        }
+      }
+      if (causes.lastOrNull() != description) causes.add(description)
+      current = cause.cause
+    }
+    return causes.joinToString(" <- ")
+  }
+
+  /**
+   * Recover a transaction marker left by a killed process.
+   *
+   * GitHelper already holds this repository's process lock. Internal app
+   * repositories cannot be accessed by another application process, so any
+   * existing marker there is orphaned. For shared/external paths, only remove
+   * a conservatively aged marker in case another process legitimately uses it.
+   */
+  private fun removeOrphanedIndexLock(gitRootDir: String) {
+    val indexLock = File(File(gitRootDir, ".git"), "index.lock")
+    if (!indexLock.exists()) return
+
+    val canonicalRoot = try {
+      File(gitRootDir).canonicalFile.absolutePath
+    } catch (_: IOException) {
+      File(gitRootDir).absoluteFile.absolutePath
+    }
+    val lockAgeMs = (System.currentTimeMillis() - indexLock.lastModified()).coerceAtLeast(0)
+    val isInternalAppRepository = canonicalRoot.startsWith("/data/user/") ||
+      canonicalRoot.startsWith("/data/data/") ||
+      canonicalRoot.startsWith("/data/user_de/")
+    if (!isInternalAppRepository && lockAgeMs < EXTERNAL_STALE_INDEX_LOCK_MS) {
+      throw Exception(
+        "Index lock may still be active: ${indexLock.absolutePath} " +
+          "(ageMs=$lockAgeMs, requiredAgeMs=$EXTERNAL_STALE_INDEX_LOCK_MS)"
+      )
+    }
+    if (!indexLock.delete()) {
+      throw Exception("Cannot remove orphaned index lock ${indexLock.absolutePath} (ageMs=$lockAgeMs)")
+    }
+    android.util.Log.w(
+      "GitCommit",
+      "Removed orphaned index lock ${indexLock.absolutePath} (ageMs=$lockAgeMs)"
+    )
+  }
 
   /**
    * Rebuild .git/index from HEAD using JGit's DirCacheCheckout.
@@ -76,12 +133,18 @@ internal object GitLocal {
     authorEmail: String
   ): String {
     val result = JSONObject()
+    var phase = "open repository"
+    var pathsInProgress = emptyList<String>()
     try {
+      phase = "recover index lock"
+      removeOrphanedIndexLock(gitRootDir)
+
       val repo = GitRepository.openRepo(gitRootDir)
       try {
         val git = Git(repo)
 
         // Stage all changes: add new/modified, remove deleted
+        phase = "read status"
         val status = git.status().call()
 
         if (status.untracked.isEmpty() && status.modified.isEmpty() &&
@@ -93,12 +156,30 @@ internal object GitLocal {
           return result.toString()
         }
 
-        // git add . (stages new and modified files)
-        git.add().addFilepattern(".").call()
-        // git add -u (stages deletions)
-        git.add().setUpdate(true).addFilepattern(".").call()
+        // Stage only paths reported by status instead of `git add .`. A full
+        // work-tree scan is expensive for large TiddlyWiki repositories and
+        // can fail on an unrelated file even when only a few tiddlers changed.
+        val pathsToAdd = (status.untracked + status.modified).toSortedSet().toList()
+        for (paths in pathsToAdd.chunked(100)) {
+          phase = "add new or modified files"
+          pathsInProgress = paths
+          val addCommand = git.add()
+          paths.forEach { path -> addCommand.addFilepattern(path) }
+          addCommand.call()
+        }
+
+        val pathsToRemove = status.missing.toSortedSet().toList()
+        for (paths in pathsToRemove.chunked(100)) {
+          phase = "stage deleted files"
+          pathsInProgress = paths
+          val updateCommand = git.add().setUpdate(true)
+          paths.forEach { path -> updateCommand.addFilepattern(path) }
+          updateCommand.call()
+        }
 
         // Commit
+        phase = "commit staged changes"
+        pathsInProgress = emptyList()
         val commitResult = git.commit()
           .setMessage(message)
           .setAuthor(authorName, authorEmail)
@@ -112,9 +193,15 @@ internal object GitLocal {
         repo.close()
       }
     } catch (e: Exception) {
+      val pathDetails = if (pathsInProgress.isEmpty()) {
+        ""
+      } else {
+        "; paths=${pathsInProgress.joinToString(",")}"
+      }
+      val errorDescription = "$phase failed$pathDetails; ${describeFailure(e)}"
       result.put("ok", false)
-      result.put("error", e.message ?: "Unknown commit error")
-      android.util.Log.e("GitCommit", "Commit failed: ${e.message}", e)
+      result.put("error", errorDescription)
+      android.util.Log.e("GitCommit", "Commit failed: $errorDescription", e)
     }
     return result.toString()
   }
