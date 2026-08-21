@@ -1,6 +1,7 @@
 package expo.modules.externalstorage
 
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
 
@@ -18,7 +19,11 @@ internal object GitRepositoryLock {
   private val locks = ConcurrentHashMap<String, ReentrantLock>()
 
   fun <T> withLock(gitRootDir: String, operation: () -> T): T {
-    val repositoryKey = File(gitRootDir).canonicalFile.absolutePath
+    val repositoryKey = try {
+      File(gitRootDir).canonicalFile.absolutePath
+    } catch (_: IOException) {
+      File(gitRootDir).absoluteFile.absolutePath
+    }
     val lock = locks.computeIfAbsent(repositoryKey) { ReentrantLock(true) }
     lock.lock()
     return try {

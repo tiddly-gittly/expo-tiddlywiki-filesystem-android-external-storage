@@ -8,6 +8,7 @@ import org.eclipse.jgit.treewalk.TreeWalk
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 
 internal object GitLocal {
 
@@ -43,10 +44,15 @@ internal object GitLocal {
     val indexLock = File(File(gitRootDir, ".git"), "index.lock")
     if (!indexLock.exists()) return
 
-    val canonicalRoot = File(gitRootDir).canonicalFile.absolutePath
+    val canonicalRoot = try {
+      File(gitRootDir).canonicalFile.absolutePath
+    } catch (_: IOException) {
+      File(gitRootDir).absoluteFile.absolutePath
+    }
     val lockAgeMs = (System.currentTimeMillis() - indexLock.lastModified()).coerceAtLeast(0)
     val isInternalAppRepository = canonicalRoot.startsWith("/data/user/") ||
-      canonicalRoot.startsWith("/data/data/")
+      canonicalRoot.startsWith("/data/data/") ||
+      canonicalRoot.startsWith("/data/user_de/")
     if (!isInternalAppRepository && lockAgeMs < EXTERNAL_STALE_INDEX_LOCK_MS) {
       throw Exception(
         "Index lock may still be active: ${indexLock.absolutePath} " +
